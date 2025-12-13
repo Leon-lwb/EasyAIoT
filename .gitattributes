@@ -5,6 +5,6 @@
 *.pt binary
 *.onnx binary
 *.bin binary
-
+*.docx binary
 
 .image/ binary
