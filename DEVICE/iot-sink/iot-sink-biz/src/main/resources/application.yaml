@@ -82,6 +82,7 @@ easy-trans:
 spring:
   # Kafka 配置项，对应 KafkaProperties 配置类
   kafka:
+    bootstrap-servers: 192.168.2.14:9094   # 自定义messageBus使用手动注入kafkaTemplate，@KafkaListener使用spring boot自动注入
     # 默认监听器配置（@KafkaListener使用）
     listener:
       # 自动提交关闭，需要设置手动消息确认
@@ -92,7 +93,7 @@ spring:
     iot:
       producer:
         # Kafka服务器
-        bootstrap-servers: localhost:9092
+        bootstrap-servers: 192.168.2.14:9094
         # 开启事务，必须在开启了事务的方法中发送，否则报错
         transaction-id-prefix: kafkaTx-
         # 发生错误后，消息重发的次数，开启事务必须设置大于0。
@@ -112,7 +113,7 @@ spring:
         value-serializer: org.apache.kafka.common.serialization.StringSerializer
       consumer:
         # Kafka服务器
-        bootstrap-servers: localhost:9092
+        bootstrap-servers: 192.168.2.14:9094
         group-id: iot-sink
         # 自动提交的时间间隔 在spring boot 2.X 版本中这里采用的是值的类型为Duration 需要符合特定的格式，如1S,1M,2H,5D
         #auto-commit-interval: 2s

@@ -39,12 +39,12 @@ services:
   # 在 PostgreSQL 启动前自动运行，修复数据目录权限问题
   # 解决 "could not open file global/pg_filenode.map: Permission denied" 错误
   PostgresSQL-init:
-    image: postgres:18
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/postgres:18
     container_name: postgres-init
     user: "0:0"
     volumes:
-      - ./db_data/data:/var/lib/postgresql/data:rw
-      - ./db_data/log:/var/log/postgresql:rw
+      - postgres-easyaiot-data:/var/lib/postgresql/data:rw
+      - postgres-easyaiot-log:/var/log/postgresql:rw
     command:
       [
         "/bin/bash",
@@ -57,7 +57,7 @@ services:
 
   # PostgresSQL Server
   PostgresSQL:
-    image: postgres:18
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/postgres:18
     container_name: postgres-server
     restart: always
     ports:
@@ -69,8 +69,8 @@ services:
       - POSTGRES_DB=postgres
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
-      - ./db_data/data:/var/lib/postgresql/data:rw
-      - ./db_data/log:/var/log/postgresql:rw
+      - postgres-easyaiot-data:/var/lib/postgresql/data:rw
+      - postgres-easyaiot-log:/var/log/postgresql:rw
       # SQL 文件挂载（按字母顺序执行）
       # 注意：确保 ../postgresql 目录存在，否则挂载会失败
       - ../postgresql:/docker-entrypoint-initdb.d:rw
@@ -104,7 +104,7 @@ services:
 
   # TDengine Server
   TDengine:
-    image: tdengine/tsdb:3.3.8.4
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/tdengine/tsdb:3.3.8.4
     container_name: tdengine-server
     privileged: true
     restart: always
@@ -139,7 +139,7 @@ services:
 
   # TDengine 初始化容器（在 TDengine 就绪后执行数据库和超级表初始化）
   TDengine-init:
-    image: tdengine/tdengine:3.3.0.0
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/tdengine/tsdb:3.3.8.4
     container_name: tdengine-init
     depends_on:
       TDengine:
@@ -168,7 +168,7 @@ services:
     restart: always
     privileged: true
     ports:
-      - "6379:6379"
+      - "6389:6379"
     environment:
       - TZ=Asia/Shanghai
     command: >
@@ -220,7 +220,7 @@ services:
       # - INTERNAL://Kafka:9092 - 用于 Docker 网络内的服务（如 DEVICE 服务）
       # - EXTERNAL://localhost:9094 - 用于 host 网络模式的服务（如 VIDEO 服务）
       # 注意：每个监听器必须有不同的名称，否则 Kafka 会报错
-      - KAFKA_ADVERTISED_LISTENERS=INTERNAL://Kafka:9092,EXTERNAL://localhost:9094
+      - KAFKA_ADVERTISED_LISTENERS=INTERNAL://Kafka:9092,EXTERNAL://192.168.2.14:9094
       - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       - KAFKA_CONTROLLER_QUORUM_VOTERS=1@Kafka:9093
       - KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL
@@ -289,8 +289,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
     volumes:
-      - "./srs_data/conf:/usr/local/srs/conf:rw"
-      - "./srs_data/conf:/opt/srs/trunk/conf:rw"
+      - "../srs/conf:/usr/local/srs/conf:rw"
+      - "../srs/conf:/opt/srs/trunk/conf:rw"
       - "/data:/data:rw"
     command: ["./objs/srs", "-c", "conf/docker.conf"]
     working_dir: /usr/local/srs
@@ -377,6 +377,8 @@ volumes:
     driver: local
   emqx_log:
     driver: local
+  postgres-easyaiot-data:
+  postgres-easyaiot-log:
 
 # 网络配置
 # 注意：当宿主机IP发生变化后，如果容器无法加入网络，请执行以下命令修复：
