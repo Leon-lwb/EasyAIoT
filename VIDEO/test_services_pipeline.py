@@ -41,6 +41,23 @@ from collections import deque
 video_root = Path(__file__).parent.absolute()
 sys.path.insert(0, str(video_root))
 
+def get_device():
+    """根据环境变量动态选择设备"""
+    use_gpu = os.environ.get('USE_GPU', 'False').lower() == 'true'
+    if not use_gpu:
+        return 'cpu'
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device_id = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0]
+            return f'cuda:{device_id}' if device_id else 'cuda'
+        else:
+            logging.warning('USE_GPU设置为True但CUDA不可用，回退到CPU')
+            return 'cpu'
+    except Exception:
+        return 'cpu'
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
@@ -1027,7 +1044,7 @@ def yolo_detection_worker(worker_id: int):
                     imgsz=640,  # 使用640尺寸，YOLO会自动保持宽高比缩放
                     verbose=False,
                     half=False,  # 如果GPU支持，可以设置为True以提升速度
-                    device='cpu'  # 可以根据实际情况使用GPU
+                    device=get_device()  # 可以根据实际情况使用GPU
                 )
                 result = results[0]
                 
