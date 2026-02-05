@@ -1,6 +1,9 @@
 # 使用PyTorch官方镜像作为基础镜像（与AI服务保持一致）
 FROM pytorch/pytorch:2.9.0-cuda12.8-cudnn9-devel AS base
 
+# GPU支持构建参数
+ARG USE_GPU=true
+
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
@@ -63,11 +66,18 @@ FROM dependencies AS python-deps
 
 # 复制requirements文件（利用Docker缓存层）
 COPY requirements.txt .
+COPY requirements-gpu.txt .
 
 # 使用清华源安装Python依赖
 RUN set -ex && \
     pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install -r requirements.txt --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple
+    if [ "$USE_GPU" = "true" ]; then \
+        echo "安装GPU版本依赖..." && \
+        pip install -r requirements-gpu.txt --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple; \
+    else \
+        echo "安装CPU版本依赖..." && \
+        pip install -r requirements.txt --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple; \
+    fi
 
 # ======================= 第三阶段：应用部署 =======================
 FROM python-deps AS runtime

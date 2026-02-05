@@ -37,6 +37,23 @@ sys.path.insert(0, video_root)
 # 导入VIDEO模块的模型
 from models import db, AlgorithmTask, Device
 
+def get_device():
+    """根据环境变量动态选择设备"""
+    use_gpu = os.environ.get('USE_GPU', 'False').lower() == 'true'
+    if not use_gpu:
+        return 'cpu'
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device_id = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0]
+            return f'cuda:{device_id}' if device_id else 'cuda'
+        else:
+            logging.warning('USE_GPU设置为True但CUDA不可用，回退到CPU')
+            return 'cpu'
+    except Exception:
+        return 'cpu'
+
 # Flask应用实例（延迟创建，避免导入run模块时的副作用）
 _flask_app = None
 
@@ -2266,7 +2283,7 @@ def yolo_detection_worker(worker_id: int):
                                 imgsz=YOLO_IMG_SIZE,  # 使用配置的检测分辨率（默认416，原640）
                                 verbose=False,
                                 half=False,
-                                device='cpu'
+                                device=get_device()
                             )
                             result = results[0]
 

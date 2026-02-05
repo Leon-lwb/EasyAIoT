@@ -63,8 +63,8 @@ echo "" >> "$LOG_FILE"
 MODULES=(
     ".scripts/docker"  # 基础服务（Nacos、PostgreSQL、Redis等）
     "DEVICE"           # Device服务（网关和微服务）
-     "AI"               # AI服务
-     "VIDEO"            # Video服务
+    "AI"               # AI服务
+    "VIDEO"            # Video服务
     "WEB"              # Web前端服务
 )
 
@@ -795,8 +795,12 @@ stop_all() {
     check_docker_compose
     
     # 逆序停止
-    for ((idx=${#MODULES[@]}-1 ; idx>=0 ; idx--)); do
-        execute_module_command "${MODULES[idx]}" "stop"
+    # 获取数组长度
+    local count=${#MODULES[@]}
+    # 倒序遍历
+    while [ $count -gt 0 ]; do
+        count=$((count - 1))
+        execute_module_command "${MODULES[count]}" "stop"
         echo ""
     done
     
@@ -948,8 +952,12 @@ clean_all() {
         check_docker_compose
         
         # 逆序清理
-        for ((idx=${#MODULES[@]}-1 ; idx>=0 ; idx--)); do
-            execute_module_command "${MODULES[idx]}" "clean"
+        # 获取数组长度
+        local count=${#MODULES[@]}
+        # 倒序遍历
+        while [ $count -gt 0 ]; do
+            count=$((count - 1))
+            execute_module_command "${MODULES[count]}" "clean"
             echo ""
         done
         

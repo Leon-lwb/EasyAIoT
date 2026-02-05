@@ -840,8 +840,12 @@ stop_all() {
     check_docker_compose
     
     # 逆序停止
-    for ((idx=${#MODULES[@]}-1 ; idx>=0 ; idx--)); do
-        execute_module_command "${MODULES[idx]}" "stop"
+    # 获取数组长度
+    local count=${#MODULES[@]}
+    # 倒序遍历
+    while [ $count -gt 0 ]; do
+        count=$((count - 1))
+        execute_module_command "${MODULES[count]}" "stop"
         echo ""
     done
     
@@ -926,8 +930,12 @@ clean_all() {
         check_docker_compose
         
         # 逆序清理
-        for ((idx=${#MODULES[@]}-1 ; idx>=0 ; idx--)); do
-            execute_module_command "${MODULES[idx]}" "clean"
+        # 获取数组长度
+        local count=${#MODULES[@]}
+        # 倒序遍历
+        while [ $count -gt 0 ]; do
+            count=$((count - 1))
+            execute_module_command "${MODULES[count]}" "clean"
             echo ""
         done
         

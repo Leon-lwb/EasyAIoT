@@ -7,18 +7,27 @@ ONNX推理模块
 @wechat EasyAIoT2025
 """
 import os
-# 在导入onnxruntime之前设置环境变量，强制使用CPU执行提供者
-# 这样可以避免CUDA库加载错误（如cublasLtCreate符号未找到）
-# 注意：这些环境变量需要在导入onnxruntime之前设置
-if 'ORT_EXECUTION_PROVIDERS' not in os.environ:
-    os.environ['ORT_EXECUTION_PROVIDERS'] = 'CPUExecutionProvider'
+# 智能GPU/CPU切换配置
+# 读取GPU配置
+use_gpu = os.environ.get('USE_GPU', 'False').lower() == 'true'
+force_cpu = os.environ.get('ORT_EXECUTION_PROVIDERS', '').upper() == 'CPUEXECUTIONPROVIDER'
 
-# 临时隐藏GPU设备，避免onnxruntime-gpu在导入时尝试加载CUDA库
-# 保存原始的CUDA_VISIBLE_DEVICES值，以便在导入后恢复（如果需要）
-_original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
-if _original_cuda_visible_devices is None:
-    # 如果未设置，临时设置为空，避免CUDA库加载错误
-    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+if force_cpu or not use_gpu:
+    # 强制CPU模式
+    if 'ORT_EXECUTION_PROVIDERS' not in os.environ:
+        os.environ['ORT_EXECUTION_PROVIDERS'] = 'CPUExecutionProvider'
+    # 临时隐藏GPU设备，避免onnxruntime-gpu在导入时尝试加载CUDA库
+    # 保存原始的CUDA_VISIBLE_DEVICES值，以便在导入后恢复（如果需要）
+    _original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    if _original_cuda_visible_devices is None:
+        # 如果未设置，临时设置为空，避免CUDA库加载错误
+        os.environ['CUDA_VISIBLE_DEVICES'] = ''
+    print("GPU推理已禁用，使用CPU模式")
+else:
+    # GPU模式：不设置环境变量，让ONNX Runtime自动选择
+    # 保存原始的CUDA_VISIBLE_DEVICES值以便恢复
+    _original_cuda_visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    print("尝试使用GPU进行推理")
 
 import cv2
 import numpy as np
