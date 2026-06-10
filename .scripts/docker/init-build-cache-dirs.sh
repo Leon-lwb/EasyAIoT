@@ -16,6 +16,10 @@
 
 EASYAIOT_PYTHON_CACHE_MODULES=(ai video)
 EASYAIOT_BUILD_CACHE_MODULES=(ai video device web)
+# init 时跳过递归 chown 的「自属主」模块子树（其缓存由 --user 容器或宿主脚本以宿主机用户写入，
+# 属主已正确，无需 init 再 chown；尤其 device/m2 体量大）。空格分隔，可经环境变量覆盖。
+# 反例：ai/video 的 pip-wheels 由 cache_python_resources.sh 的 docker run(root) 写入，仍需 chown 规范化，故不在此列。
+EASYAIOT_CHOWN_SKIP_MODULES="${EASYAIOT_CHOWN_SKIP_MODULES:-device}"
 
 easyaiot_build_cache_base() {
     local root="${1:-${EASYAIOT_ROOT:-.}}"
@@ -202,12 +206,7 @@ init_easyaiot_build_cache_dirs() {
     migrate_legacy_python_cache_if_needed "$root"
     migrate_legacy_device_web_cache_if_needed "$root"
 
-    if [ "$(id -u)" -eq 0 ]; then
-        chown -R "${BUILD_CACHE_UID}:${BUILD_CACHE_GID}" "${base}" 2>/dev/null || true
-    elif command -v chown >/dev/null 2>&1; then
-        chown -R "${BUILD_CACHE_UID}:${BUILD_CACHE_GID}" "${base}" 2>/dev/null || \
-            print_build_cache_chown_hint "${base}" 2>/dev/null || true
-    fi
+    easyaiot_chown_build_cache "${base}"
 }
 
 # 兼容旧函数名（参数为 EASYAIOT_ROOT，非模块目录）
@@ -217,6 +216,34 @@ init_project_build_cache_dirs() {
 
 print_build_cache_chown_hint() {
     echo "[build-cache] 提示: 若构建报权限错误，请执行: sudo chown -R ${BUILD_CACHE_UID}:${BUILD_CACHE_GID} $1"
+}
+
+# 规范化构建缓存属主（条件化，避免每次整盘递归 chown）：
+#   - 跳过 EASYAIOT_CHOWN_SKIP_MODULES 列出的「自属主」模块子树（如 device/m2，属主已正确且体量大）；
+#   - 其余子树（如 ai/video 的 root 写入的 pip-wheels）仍 chown 规范化。
+#   - FORCE_CACHE_CHOWN=1 强制对整盘递归 chown（兜底）。
+# root 下 chown 必成功；非 root 但为属主时成功；否则打印提示。
+easyaiot_chown_build_cache() {
+    local base="$1"
+    command -v chown >/dev/null 2>&1 || return 0
+    local target="${BUILD_CACHE_UID}:${BUILD_CACHE_GID}"
+
+    # 强制、或无跳过项 → 退化为原整盘递归 chown
+    if [ "${FORCE_CACHE_CHOWN:-0}" = "1" ] || [ -z "${EASYAIOT_CHOWN_SKIP_MODULES// /}" ]; then
+        chown -R "$target" "$base" 2>/dev/null \
+            || print_build_cache_chown_hint "$base" 2>/dev/null || true
+        return 0
+    fi
+
+    # 构造 find 的 prune 条件，跳过 self-owned 模块子树
+    local prune=() m first=1
+    for m in $EASYAIOT_CHOWN_SKIP_MODULES; do
+        if [ "$first" = "1" ]; then prune+=( -path "${base}/${m}" ); first=0
+        else prune+=( -o -path "${base}/${m}" ); fi
+    done
+    find "$base" \( "${prune[@]}" \) -prune -o -print0 2>/dev/null \
+        | xargs -0 -r chown "$target" 2>/dev/null \
+        || print_build_cache_chown_hint "$base" 2>/dev/null || true
 }
 
 enable_docker_buildkit() {
