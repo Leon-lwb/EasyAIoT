@@ -292,14 +292,18 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localho
 VIDEO_SERVICE_PORT = os.getenv('VIDEO_SERVICE_PORT', '6000')
 # 网关地址（用于构建完整的告警hook URL）
 GATEWAY_URL = os.getenv('GATEWAY_URL', 'http://localhost:48080')
-# 告警hook URL：优先使用GATEWAY_URL，如果GATEWAY_URL包含端口则使用，否则使用VIDEO_SERVICE_PORT
-if GATEWAY_URL and GATEWAY_URL != 'http://localhost:48080':
-    # 使用网关地址构建hook URL
-    ALERT_HOOK_URL = f"{GATEWAY_URL}/video/alert/hook"
-    FACE_MATCHING_PUBLISH_URL = f"{GATEWAY_URL}/video/face/matching/publish"
-    PLATE_MATCHING_PUBLISH_URL = f"{GATEWAY_URL}/video/plate/matching/publish"
+# 告警 hook URL：经网关须带 /admin-api 前缀（见 iot-gateway application.yaml video-admin-api 路由）
+_GATEWAY_BASE = (GATEWAY_URL or '').rstrip('/')
+_USE_GATEWAY = bool(_GATEWAY_BASE) and _GATEWAY_BASE not in (
+    'http://localhost:48080',
+    'http://127.0.0.1:48080',
+)
+if _USE_GATEWAY:
+    ALERT_HOOK_URL = f"{_GATEWAY_BASE}/admin-api/video/alert/hook"
+    FACE_MATCHING_PUBLISH_URL = f"{_GATEWAY_BASE}/admin-api/video/face/matching/publish"
+    PLATE_MATCHING_PUBLISH_URL = f"{_GATEWAY_BASE}/admin-api/video/plate/matching/publish"
 else:
-    # 回退到使用VIDEO_SERVICE_PORT（本地开发环境）
+    # 本机网关地址或未配置时，直连 VIDEO 服务端口
     ALERT_HOOK_URL = f"http://localhost:{VIDEO_SERVICE_PORT}/video/alert/hook"
     FACE_MATCHING_PUBLISH_URL = f"http://localhost:{VIDEO_SERVICE_PORT}/video/face/matching/publish"
     PLATE_MATCHING_PUBLISH_URL = f"http://localhost:{VIDEO_SERVICE_PORT}/video/plate/matching/publish"
@@ -1081,6 +1085,7 @@ def load_yolo_models(model_ids: List[int]) -> Dict[int, Any]:
 
         for model_id in model_ids:
             try:
+                model_api_class_names = None
                 # 默认模型映射
                 default_model_map = {
                     -1: 'yolo11n.pt',
@@ -1119,6 +1124,9 @@ def load_yolo_models(model_ids: List[int]) -> Dict[int, Any]:
                             if model_data.get('code') == 0:
                                 model_info = model_data.get('data', {})
                                 model_path = model_info.get('model_path') or model_info.get('onnx_model_path')
+                                model_api_class_names = (
+                                    model_info.get('classNames') or model_info.get('class_names')
+                                )
 
                                 if not model_path:
                                     logger.warning(f"模型 {model_id} 没有模型路径，跳过")
@@ -1178,13 +1186,15 @@ def load_yolo_models(model_ids: List[int]) -> Dict[int, Any]:
                         conf_threshold=0.25,
                         iou_threshold=0.45,
                         device_id=gpu_id,
+                        api_class_names=model_api_class_names,
                     )
                     models[model_id] = onnx_model
                     yolo_model_devices[model_id] = (
                         f'onnx:cuda:{gpu_id}' if gpu_id is not None else 'onnx:cpu'
                     )
                     logger.info(
-                        f"✅ ONNX模型加载成功: model_id={model_id}, providers={onnx_model.providers}"
+                        f"✅ ONNX模型加载成功: model_id={model_id}, classes={onnx_model.classes_dict}, "
+                        f"providers={onnx_model.providers}"
                     )
                 else:
                     logger.info(f"正在加载YOLO模型: model_id={model_id}, path={model_path}")

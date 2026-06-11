@@ -10,12 +10,24 @@ from flask_sqlalchemy import SQLAlchemy
 db = SQLAlchemy()
 
 
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
 def utc_isoformat_z(dt):
     """naive UTC（与 utcnow 一致）序列化为带 Z 的 ISO-8601，便于前端按 UTC 解析后再格式化为本地时间。"""
     if dt is None:
         return None
     u = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
     return u.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def parse_shanghai_naive_to_utc_naive(dt):
+    """将无时区 datetime 按 Asia/Shanghai 理解并转为数据库存储用的 UTC naive。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.replace(tzinfo=SHANGHAI_TZ).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 class DeviceDirectory(db.Model):
@@ -27,6 +39,8 @@ class DeviceDirectory(db.Model):
     parent_id = db.Column(db.Integer, db.ForeignKey('device_directory.id', ondelete='CASCADE'), nullable=True, comment='父目录ID，NULL表示根目录')
     description = db.Column(db.String(500), nullable=True, comment='目录描述')
     sort_order = db.Column(db.Integer, default=0, nullable=False, comment='排序顺序')
+    snap_save_time = db.Column(db.Integer, default=7, nullable=False, comment='抓拍保存天数[0:永久,>=7:天]，目录内非自定义设备继承此值')
+    record_save_time = db.Column(db.Integer, default=7, nullable=False, comment='录像保存天数[0:永久,>=7:天]，目录内非自定义设备继承此值')
     created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
     updated_at = db.Column(db.DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
     
@@ -275,7 +289,8 @@ class SnapSpace(db.Model):
     space_code = db.Column(db.String(255), nullable=False, unique=True, comment='空间编号（唯一标识）')
     bucket_name = db.Column(db.String(255), nullable=False, comment='MinIO bucket名称')
     save_mode = db.Column(db.SmallInteger, default=0, nullable=False, comment='文件保存模式[0:标准存储,1:归档存储]')
-    save_time = db.Column(db.Integer, default=0, nullable=False, comment='文件保存时间[0:永久保存,>=7(单位:天)]')
+    save_time = db.Column(db.Integer, default=7, nullable=False, comment='文件保存时间[0:永久保存,>=7(单位:天)]')
+    save_time_custom = db.Column(db.Boolean, default=False, nullable=False, comment='是否自定义保存时间（False 时跟随目录默认值）')
     description = db.Column(db.String(500), nullable=True, comment='空间描述')
     device_id = db.Column(db.String(100), db.ForeignKey('device.id', ondelete='SET NULL'), nullable=True, unique=True, comment='关联的设备ID（一对一关系）')
     created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
@@ -285,22 +300,25 @@ class SnapSpace(db.Model):
     snap_tasks = db.relationship('SnapTask', backref='snap_space', lazy=True, cascade='all, delete-orphan')
     # 关联的设备
     device = db.relationship('Device', backref='snap_space', uselist=False)
+    snap_images = db.relationship('SnapImage', backref='snap_space', lazy=True, cascade='all, delete-orphan')
     
     def to_dict(self):
         """转换为字典"""
-        return {
+        from app.services.space_save_time_service import enrich_snap_space_dict
+        return enrich_snap_space_dict({
             'id': self.id,
             'space_name': self.space_name,
             'space_code': self.space_code,
             'bucket_name': self.bucket_name,
             'save_mode': self.save_mode,
             'save_time': self.save_time,
+            'save_time_custom': self.save_time_custom,
             'description': self.description,
             'device_id': self.device_id,
             'task_count': len(self.snap_tasks) if self.snap_tasks else 0,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
-        }
+        }, self)
 
 
 class RecordSpace(db.Model):
@@ -312,7 +330,8 @@ class RecordSpace(db.Model):
     space_code = db.Column(db.String(255), nullable=False, unique=True, comment='空间编号（唯一标识）')
     bucket_name = db.Column(db.String(255), nullable=False, comment='MinIO bucket名称')
     save_mode = db.Column(db.SmallInteger, default=0, nullable=False, comment='文件保存模式[0:标准存储,1:归档存储]')
-    save_time = db.Column(db.Integer, default=0, nullable=False, comment='文件保存时间[0:永久保存,>=7(单位:天)]')
+    save_time = db.Column(db.Integer, default=7, nullable=False, comment='文件保存时间[0:永久保存,>=7(单位:天)]')
+    save_time_custom = db.Column(db.Boolean, default=False, nullable=False, comment='是否自定义保存时间（False 时跟随目录默认值）')
     description = db.Column(db.String(500), nullable=True, comment='空间描述')
     device_id = db.Column(db.String(100), db.ForeignKey('device.id', ondelete='SET NULL'), nullable=True, unique=True, comment='关联的设备ID（一对一关系）')
     created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
@@ -320,20 +339,121 @@ class RecordSpace(db.Model):
     
     # 关联的设备
     device = db.relationship('Device', backref='record_space', uselist=False)
+    record_files = db.relationship('RecordFile', backref='record_space', lazy=True, cascade='all, delete-orphan')
     
     def to_dict(self):
         """转换为字典"""
-        return {
+        from app.services.space_save_time_service import enrich_record_space_dict
+        return enrich_record_space_dict({
             'id': self.id,
             'space_name': self.space_name,
             'space_code': self.space_code,
             'bucket_name': self.bucket_name,
             'save_mode': self.save_mode,
             'save_time': self.save_time,
+            'save_time_custom': self.save_time_custom,
             'description': self.description,
             'device_id': self.device_id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None
+        }, self)
+
+
+class SpaceGroupSavePolicy(db.Model):
+    """NVR / GB28181 分组默认存储策略（联动更新组内非自定义设备空间）"""
+    __tablename__ = 'space_group_save_policy'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    group_type = db.Column(db.String(20), nullable=False, comment='分组类型: nvr / gb28181')
+    group_key = db.Column(db.String(100), nullable=False, comment='NVR ID 或国标 SIP 设备 ID')
+    snap_save_time = db.Column(db.Integer, default=7, nullable=False, comment='抓拍保存天数[0:永久,>=7:天]')
+    record_save_time = db.Column(db.Integer, default=7, nullable=False, comment='录像保存天数[0:永久,>=7:天]')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
+
+    __table_args__ = (
+        db.UniqueConstraint('group_type', 'group_key', name='uq_space_group_save_policy'),
+    )
+
+
+class RecordFile(db.Model):
+    """录像空间文件元数据表（MinIO 实体 + DB 索引，列表查询走数据库分页）"""
+    __tablename__ = 'record_file'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    space_id = db.Column(db.Integer, db.ForeignKey('record_space.id', ondelete='CASCADE'), nullable=False, index=True)
+    device_id = db.Column(db.String(100), nullable=False, index=True, comment='设备ID')
+    object_name = db.Column(db.String(500), nullable=False, comment='MinIO 对象路径')
+    bucket_name = db.Column(db.String(255), nullable=False, comment='MinIO bucket')
+    filename = db.Column(db.String(255), nullable=False, comment='文件名')
+    file_size = db.Column(db.BigInteger, nullable=True, comment='文件大小（字节）')
+    content_type = db.Column(db.String(100), default='video/mp4', comment='MIME 类型')
+    etag = db.Column(db.String(128), nullable=True, comment='MinIO ETag')
+    url = db.Column(db.String(500), nullable=False, comment='MinIO 下载地址')
+    thumbnail_url = db.Column(db.String(500), nullable=True, comment='封面下载地址')
+    duration = db.Column(db.SmallInteger, nullable=True, comment='时长（秒）')
+    event_time = db.Column(db.DateTime, nullable=False, index=True, comment='录像时间（排序字段）')
+    source = db.Column(db.String(50), default='dvr', nullable=False, comment='来源[dvr|manual]')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
+    updated_at = db.Column(db.DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
+
+    __table_args__ = (
+        db.UniqueConstraint('bucket_name', 'object_name', name='uq_record_file_bucket_object'),
+        db.Index('ix_record_file_space_event_time', 'space_id', 'event_time'),
+    )
+
+    def to_list_item(self):
+        return {
+            'id': self.id,
+            'object_name': self.object_name,
+            'filename': self.filename,
+            'size': self.file_size or 0,
+            'last_modified': self.event_time.isoformat() if self.event_time else None,
+            'etag': self.etag or '',
+            'content_type': self.content_type or 'video/mp4',
+            'url': self.url,
+            'duration': self.duration,
+            'thumbnail_url': self.thumbnail_url,
+        }
+
+
+class SnapImage(db.Model):
+    """抓拍空间图片元数据表（MinIO 实体 + DB 索引，列表查询走数据库分页）"""
+    __tablename__ = 'snap_image'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    space_id = db.Column(db.Integer, db.ForeignKey('snap_space.id', ondelete='CASCADE'), nullable=False, index=True)
+    device_id = db.Column(db.String(100), nullable=False, index=True, comment='设备ID')
+    object_name = db.Column(db.String(500), nullable=False, comment='MinIO 对象路径')
+    bucket_name = db.Column(db.String(255), nullable=False, comment='MinIO bucket')
+    filename = db.Column(db.String(255), nullable=False, comment='文件名')
+    file_size = db.Column(db.BigInteger, nullable=True, comment='文件大小（字节）')
+    content_type = db.Column(db.String(100), default='image/jpeg', comment='MIME 类型')
+    etag = db.Column(db.String(128), nullable=True, comment='MinIO ETag')
+    url = db.Column(db.String(500), nullable=False, comment='MinIO 下载地址')
+    captured_at = db.Column(db.DateTime, nullable=False, index=True, comment='抓拍时间（排序字段）')
+    task_id = db.Column(db.Integer, nullable=True, comment='关联抓拍任务ID')
+    source = db.Column(db.String(50), default='snap', nullable=False, comment='来源[snap|frame|algorithm]')
+    created_at = db.Column(db.DateTime, default=lambda: datetime.utcnow())
+
+    __table_args__ = (
+        db.UniqueConstraint('bucket_name', 'object_name', name='uq_snap_image_bucket_object'),
+        db.Index('ix_snap_image_space_captured_at', 'space_id', 'captured_at'),
+    )
+
+    def to_list_item(self):
+        return {
+            'id': self.id,
+            'object_name': self.object_name,
+            'filename': self.filename,
+            'size': self.file_size or 0,
+            'last_modified': utc_isoformat_z(self.captured_at),
+            'captured_at': utc_isoformat_z(self.captured_at),
+            'source': self.source or 'snap',
+            'task_id': self.task_id,
+            'etag': self.etag or '',
+            'content_type': self.content_type or 'image/jpeg',
+            'url': self.url,
         }
 
 

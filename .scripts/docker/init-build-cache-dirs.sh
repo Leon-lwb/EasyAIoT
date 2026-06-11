@@ -202,12 +202,7 @@ init_easyaiot_build_cache_dirs() {
     migrate_legacy_python_cache_if_needed "$root"
     migrate_legacy_device_web_cache_if_needed "$root"
 
-    if [ "$(id -u)" -eq 0 ]; then
-        chown -R "${BUILD_CACHE_UID}:${BUILD_CACHE_GID}" "${base}" 2>/dev/null || true
-    elif command -v chown >/dev/null 2>&1; then
-        chown -R "${BUILD_CACHE_UID}:${BUILD_CACHE_GID}" "${base}" 2>/dev/null || \
-            print_build_cache_chown_hint "${base}" 2>/dev/null || true
-    fi
+    easyaiot_chown_build_cache "${base}"
 }
 
 # 兼容旧函数名（参数为 EASYAIOT_ROOT，非模块目录）
@@ -217,6 +212,15 @@ init_project_build_cache_dirs() {
 
 print_build_cache_chown_hint() {
     echo "[build-cache] 提示: 若构建报权限错误，请执行: sudo chown -R ${BUILD_CACHE_UID}:${BUILD_CACHE_GID} $1"
+}
+
+# 规范化构建缓存属主为构建用户（整盘递归 chown，自愈历史 root 污染）。
+# root 下 chown 必成功；非 root 但为属主时成功；否则打印提示（让用户手动 sudo chown）。
+easyaiot_chown_build_cache() {
+    local base="$1"
+    command -v chown >/dev/null 2>&1 || return 0
+    chown -R "${BUILD_CACHE_UID}:${BUILD_CACHE_GID}" "$base" 2>/dev/null \
+        || print_build_cache_chown_hint "$base" 2>/dev/null || true
 }
 
 enable_docker_buildkit() {

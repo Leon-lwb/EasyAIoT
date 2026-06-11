@@ -551,12 +551,10 @@ def capture_image(task, device, space):
                     logger.error(f"设备 {device.id} RTMP流抽帧异常: {str(e)}", exc_info=True)
                     return False
             else:
-                # 从RTSP流中抽帧（使用OpenCV）
-                cap = cv2.VideoCapture(source)
-                ret, frame = cap.read()
-                cap.release()
-                
-                if not ret:
+                # 从RTSP流中抽帧（跳过缓冲旧帧与灰屏）
+                from app.utils.rtsp_stream_utils import capture_rtsp_frame
+                ret, frame = capture_rtsp_frame(source)
+                if not ret or frame is None:
                     logger.error(f"设备 {device.id} RTSP流读取失败")
                     return False
         else:  # 抓拍（使用ONVIF快照）
@@ -697,7 +695,21 @@ def capture_image(task, device, space):
             len(image_bytes),
             content_type="image/jpeg"
         )
-        
+
+        try:
+            from app.services.space_file_metadata_service import upsert_snap_image
+            upsert_snap_image(
+                space_id=space.id,
+                device_id=device.id,
+                object_name=object_name,
+                bucket_name=bucket_name,
+                file_size=len(image_bytes),
+                task_id=task.id,
+                source='snap',
+            )
+        except Exception as meta_err:
+            logger.error(f"写入抓拍元数据失败: device_id={device.id}, error={meta_err}")
+
         logger.info(f"抓拍成功: {bucket_name}/{object_name}")
         return True
         
