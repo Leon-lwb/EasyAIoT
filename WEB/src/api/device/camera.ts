@@ -14,6 +14,24 @@ const commonApi = (method: 'get' | 'post' | 'delete' | 'put', url: string, param
   }, { isTransformResponse: isTransformResponse });
 };
 
+// ====================== 流地址 secure_link 签名票据 ======================
+export interface StreamTicketResp {
+  /** 过期 unix 秒 */
+  e: number;
+  /** url-safe base64 的 md5 签名 */
+  st: string;
+}
+
+/**
+ * 为受保护的流路径（/ai /live /rtp）签发短期 secure_link 票据。
+ * 需登录；未登录/会话过期返回 401，由 axios 拦截器统一跳登录。
+ * @param path 流地址的 pathname，例如 /rtp/xxx.live.flv
+ * @param ttl  有效期（秒），默认 90
+ */
+export const signStreamTicket = (path: string, ttl = 90): Promise<StreamTicketResp> => {
+  return commonApi('post', `${CAMERA_PREFIX}/stream/ticket/sign`, { path, ttl }) as Promise<StreamTicketResp>;
+};
+
 // ====================== 流媒体转发接口 ======================
 /**
  * 启动FFmpeg转发RTSP流到RTMP服务器
@@ -196,6 +214,11 @@ function cameraDevicePath(device_id: string) {
 
 export const getDeviceInfo = (device_id: string, params?: { name?: string }) => {
   return commonApi('get', cameraDevicePath(device_id), params || {});
+};
+
+/** 确保设备已有关联的抓拍空间与录像空间（缺失则自动创建） */
+export const ensureDeviceSpaces = (device_id: string) => {
+  return commonApi('post', `${cameraDevicePath(device_id)}/ensure-spaces`, {}, {}, false);
 };
 
 /** 获取设备坐标（地图选点弹窗；国标虚拟通道不存在时后端按需入库） */
@@ -628,6 +651,8 @@ export interface DeviceDirectory {
   sort_order: number;
   device_count?: number;
   is_default?: boolean;
+  snap_save_time?: number;
+  record_save_time?: number;
   children?: DeviceDirectory[];
   created_at?: string;
   updated_at?: string;
@@ -666,6 +691,8 @@ export interface MonitorTreeDirectoryNode {
   sort_order?: number;
   device_count?: number;
   is_default?: boolean;
+  snap_save_time?: number;
+  record_save_time?: number;
   children: MonitorTreeDirectoryNode[];
   devices: MonitorTreeDeviceNode[];
 }
@@ -815,6 +842,8 @@ export const updateDirectory = (directory_id: number, data: {
   parent_id?: number | null;
   description?: string;
   sort_order?: number;
+  snap_save_time?: number;
+  record_save_time?: number;
 }) => {
   return commonApi('put', `${CAMERA_PREFIX}/directory/${directory_id}`, data);
 };

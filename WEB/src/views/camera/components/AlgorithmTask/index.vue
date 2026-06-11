@@ -261,6 +261,7 @@ import { getBasicColumns, getFormConfig } from './Data';
 import AI_TASK_IMAGE from '@/assets/images/video/ai-task.png';
 import SNAP_TASK_IMAGE from '@/assets/images/video/snap-task.png';
 import { Button } from '@/components/Button'
+import { rewriteStreamHostToPageHost } from '@/views/camera/utils/devicePlay';
 const ListItem = List.Item;
 
 defineOptions({ name: 'AlgorithmTask' });
@@ -880,7 +881,10 @@ const playCameraStream = (stream: CameraStreamInfo) => {
     createMessage.warning(`摄像头 ${stream.device_name} 暂无推流地址`);
     return;
   }
-  
+
+  // 将流地址的 IP+端口改写为当前浏览器地址，便于不同环境下直接拉流
+  httpStream = rewriteStreamHostToPageHost(httpStream);
+
   // 打开播放器
   openPlayerModal(true, {
     id: stream.device_id,

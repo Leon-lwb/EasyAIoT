@@ -3,10 +3,13 @@
 @email andywebjava@163.com
 @wechat EasyAIoT2025
 """
+import base64
 import datetime
+import hashlib
 import io
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -35,6 +38,71 @@ from sqlalchemy import and_
 
 camera_bp = Blueprint('camera', __name__)
 logger = logging.getLogger(__name__)
+
+# 受保护的流路径前缀（SRS http-flv: /ai /live；ZLMediaKit ws-flv: /rtp）
+_STREAM_PATH_RE = re.compile(r'^/(ai|live|rtp)/')
+# 网关登录校验地址（host 网络下走宿主机网关 48080）；可用 AUTH_CHECK_URL 覆盖
+_AUTH_CHECK_URL = os.environ.get(
+    'AUTH_CHECK_URL', 'http://127.0.0.1:48080/admin-api/system/auth/get-permission-info'
+)
+
+
+def _check_login(req) -> bool:
+    """用请求里的 JWT 调网关校验登录态：HTTP 200 且业务 code==0 才算有效。
+
+    nginx 把 /dev-api/video/ 直连 VIDEO 绕过了网关，故签发接口必须自校验登录。
+    """
+    auth = (req.headers.get('Authorization') or req.headers.get('X-Authorization') or '').strip()
+    if not auth:
+        return False
+    try:
+        r = requests.get(
+            _AUTH_CHECK_URL,
+            headers={
+                'Authorization': auth,
+                'tenant-id': req.headers.get('tenant-id', '') or req.headers.get('Tenant-Id', ''),
+            },
+            timeout=5,
+        )
+        if r.status_code != 200:
+            return False
+        body = r.json()
+        return isinstance(body, dict) and body.get('code') == 0
+    except Exception as e:
+        logger.warning(f'流票据登录校验失败: {e}')
+        return False
+
+
+@camera_bp.route('/stream/ticket/sign', methods=['POST'])
+def sign_stream_ticket():
+    """为流地址签发短期 secure_link 票据（需登录）。
+
+    请求: { "path": "/rtp/xxx.live.flv", "ttl": 90 }
+    返回: { "code": 0, "data": { "e": <过期unix秒>, "st": <url-safe base64 md5> } }
+    未登录/过期: HTTP 401（前端 axios 据此跳登录）。
+
+    签名公式必须与 nginx `secure_link_md5 "$arg_e$uri <secret>"` 逐字符一致：
+    md5( f"{e}{path} {secret}" ) -> url-safe base64 -> 去掉 '=' 填充。
+    """
+    if not _check_login(request):
+        return jsonify({'code': 401, 'msg': 'unauthorized'}), 401
+    data = request.get_json(silent=True) or {}
+    path = (data.get('path') or '').strip()
+    if not _STREAM_PATH_RE.match(path):
+        return jsonify({'code': 400, 'msg': 'invalid stream path'}), 400
+    secret = os.environ.get('STREAM_TICKET_SECRET', '')
+    if not secret:
+        logger.error('STREAM_TICKET_SECRET 未配置，无法签发流票据')
+        return jsonify({'code': 500, 'msg': 'stream ticket secret not configured'}), 500
+    try:
+        ttl = int(data.get('ttl') or 90)
+    except (TypeError, ValueError):
+        ttl = 90
+    ttl = max(15, min(ttl, 600))
+    e = int(time.time()) + ttl
+    raw = hashlib.md5(f"{e}{path} {secret}".encode('utf-8')).digest()
+    st = base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
+    return jsonify({'code': 0, 'msg': 'success', 'data': {'e': e, 'st': st}})
 
 
 def _strip_rtsp_transport_query(source_url: str) -> tuple[str, Optional[str]]:
@@ -727,6 +795,34 @@ def get_device_info(device_id):
     except Exception as e:
         logger.error(f'获取设备详情失败: {str(e)}')
         return jsonify({'code': 500, 'msg': '服务器内部错误'}), 500
+
+
+@camera_bp.route('/device/<string:device_id>/ensure-spaces', methods=['POST'])
+def ensure_device_spaces_route(device_id):
+    """确保设备已关联抓拍空间与录像空间（缺失则自动创建）"""
+    try:
+        from models import Device
+        from app.services.snap_space_service import get_snap_space_by_device_id
+        from app.services.record_space_service import get_record_space_by_device_id
+
+        device = Device.query.get(device_id)
+        if not device:
+            return jsonify({'code': 404, 'msg': f'设备不存在: {device_id}'}), 404
+
+        ensure_device_spaces(device_id)
+        snap_space = get_snap_space_by_device_id(device_id)
+        record_space = get_record_space_by_device_id(device_id)
+        return jsonify({
+            'code': 0,
+            'msg': '存储空间已就绪',
+            'data': {
+                'snap_space': snap_space.to_dict() if snap_space else None,
+                'record_space': record_space.to_dict() if record_space else None,
+            },
+        })
+    except Exception as e:
+        logger.error(f'初始化设备存储空间失败: {str(e)}', exc_info=True)
+        return jsonify({'code': 500, 'msg': f'服务器内部错误: {str(e)}'}), 500
 
 
 @camera_bp.route('/register/device', methods=['POST'])
@@ -2100,6 +2196,16 @@ def on_dvr_callback():
             )
             return jsonify({'code': 0, 'msg': None})
         logger.debug(f"on_dvr回调：文件已就绪 file_path={absolute_file_path}, size={file_size} bytes")
+
+        # SRS 容器常以 root 创建 755 目录，本地 ubuntu 进程后续无法删除；上传前修复权限
+        try:
+            from app.services.playback_disk_guard_service import ensure_playback_path_deletable
+            ensure_playback_path_deletable(absolute_file_path)
+        except Exception as perm_err:
+            logger.warning(
+                "on_dvr回调：修复回放文件权限失败 file_path=%s, error=%s",
+                absolute_file_path, perm_err,
+            )
         
         # 从文件路径提取日期：playbacks/<直播或AI等 app>/<stream>/YYYY/MM/DD/文件名
         parsed_date_dir, parsed_record_time = _parse_srs_dvr_path_date(absolute_file_path)
@@ -2280,6 +2386,30 @@ def on_dvr_callback():
                 db.session.rollback()
                 # 记录创建失败不影响主流程，继续执行
 
+            # 写入录像空间元数据表（列表查询走 DB 分页）
+            try:
+                from app.services.space_file_metadata_service import upsert_record_file
+                _duration = duration if ('duration' in locals() and duration > 0) else 1
+                _record_time = record_time if 'record_time' in locals() else datetime.utcnow()
+                event_time_naive = _record_time.replace(tzinfo=None) if hasattr(_record_time, 'tzinfo') and _record_time.tzinfo else _record_time
+                upsert_record_file(
+                    space_id=record_space.id,
+                    device_id=device_id,
+                    object_name=object_name,
+                    bucket_name=bucket_name,
+                    filename=filename,
+                    file_size=file_size,
+                    content_type=content_type,
+                    url=file_path_url,
+                    thumbnail_url=thumbnail_path,
+                    duration=_duration,
+                    event_time=event_time_naive,
+                    source='dvr',
+                )
+            except Exception as meta_err:
+                logger.error(f"on_dvr回调：写入录像元数据失败 device_id={device_id}, error={meta_err}", exc_info=True)
+                db.session.rollback()
+
             # 关联告警 record_path（与 door-god 一致：仅 MinIO 下载 URL）
             try:
                 from app.services.alert_service import patch_alerts_record
@@ -2361,6 +2491,8 @@ def list_directories():
                     'parent_id': directory.parent_id,
                     'description': directory.description,
                     'sort_order': directory.sort_order,
+                    'snap_save_time': getattr(directory, 'snap_save_time', 7),
+                    'record_save_time': getattr(directory, 'record_save_time', 7),
                     'is_default': camera_service.is_default_directory(directory),
                     'device_count': device_count_by_dir.get(directory.id, 0),
                     'created_at': directory.created_at.isoformat() if directory.created_at else None,
@@ -2456,6 +2588,8 @@ def get_directory_monitor_tree():
                     'name': directory.name,
                     'parent_id': directory.parent_id,
                     'sort_order': directory.sort_order,
+                    'snap_save_time': getattr(directory, 'snap_save_time', 7),
+                    'record_save_time': getattr(directory, 'record_save_time', 7),
                     'is_default': camera_service.is_default_directory(directory),
                     'device_count': len(devices),
                     'children': build_tree(directory.id),
@@ -2683,6 +2817,28 @@ def update_directory(directory_id):
         
         if 'sort_order' in data:
             directory.sort_order = data.get('sort_order', 0)
+
+        propagated = {}
+        try:
+            if 'snap_save_time' in data:
+                from app.services.space_save_time_service import (
+                    update_directory_save_time, SPACE_KIND_SNAP,
+                )
+                _, snap_updated = update_directory_save_time(
+                    directory_id, SPACE_KIND_SNAP, data.get('snap_save_time'), commit=False,
+                )
+                propagated['snap_updated'] = snap_updated
+            if 'record_save_time' in data:
+                from app.services.space_save_time_service import (
+                    update_directory_save_time, SPACE_KIND_RECORD,
+                )
+                _, record_updated = update_directory_save_time(
+                    directory_id, SPACE_KIND_RECORD, data.get('record_save_time'), commit=False,
+                )
+                propagated['record_updated'] = record_updated
+        except ValueError as ve:
+            db.session.rollback()
+            return jsonify({'code': 400, 'msg': str(ve)}), 400
         
         db.session.commit()
         
@@ -2694,7 +2850,10 @@ def update_directory(directory_id):
                 'name': directory.name,
                 'parent_id': directory.parent_id,
                 'description': directory.description,
-                'sort_order': directory.sort_order
+                'sort_order': directory.sort_order,
+                'snap_save_time': getattr(directory, 'snap_save_time', 7),
+                'record_save_time': getattr(directory, 'record_save_time', 7),
+                **propagated,
             }
         })
     except Exception as e:
@@ -2837,6 +2996,9 @@ def move_device_to_directory(device_id):
             if not directory:
                 return jsonify({'code': 400, 'msg': '目录不存在'}), 400
             device.directory_id = directory_id
+
+        from app.services.space_save_time_service import sync_device_spaces_to_directory
+        sync_device_spaces_to_directory(device.id, device.directory_id)
         
         db.session.commit()
         

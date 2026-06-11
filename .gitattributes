@@ -18,6 +18,35 @@ WEB/docker-build-logs/** -diff
 # ZLMediaKit 运行时配置：不参与 diff
 .scripts/zlmediakit/conf/config.ini -diff
 
+# ── Linux 部署相关文本文件强制 LF ──
+# 这些文件在 Linux 上被执行 / 解析，带 \r(CRLF) 会出问题（即使在 Windows 上编辑提交也会被规范化为 LF）：
+#   *.sh           脚本：#!/bin/bash\r 会“无法执行：找不到需要的文件”；
+#                  其中 docker-entrypoint.sh 卷挂载进容器后带 \r 会导致容器启动失败
+#   Dockerfile*    RUN 指令里混入 \r 可能导致命令异常
+#   *.yaml/*.yml   docker-compose 等配置
+#   .dockerignore  "face_rec.onnx\r" 这类带 \r 的模式会匹配失效，导致排除规则失灵
+#   env.example    会被 install 脚本 cp 成 .env.docker，\r 会污染环境变量值（如 localhost\r）
+*.sh           text eol=lf
+Dockerfile     text eol=lf
+Dockerfile.*   text eol=lf
+*.yaml         text eol=lf
+*.yml          text eol=lf
+.dockerignore  text eol=lf
+env.example    text eol=lf
+
+# ── 加固：以下文本文件也强制 LF（即使从 Windows 编辑/提交也规范化为 LF）──
+#   .env / .env.*  环境变量：CRLF 会给值末尾加 \r，污染密钥（如 STREAM_TICKET_SECRET 与 nginx 不一致致验签失败）、VITE_PROXY 等
+#   *.conf         nginx 等配置（如 WEB/conf/nginx.conf）
+#   *.py *.ts *.vue *.js  源码：避免整文件 diff 噪音与潜在 \r 问题
+# 注意：eol=lf 只管行尾，不管 BOM —— Windows 上请用「UTF-8 无 BOM」保存（文件含中文注释，勿用记事本）
+.env           text eol=lf
+.env.*         text eol=lf
+*.conf         text eol=lf
+*.py           text eol=lf
+*.ts           text eol=lf
+*.vue          text eol=lf
+*.js           text eol=lf
+
 *.png binary
 *.jpg binary
 *.mp4 binary
