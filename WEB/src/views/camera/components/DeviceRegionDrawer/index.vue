@@ -181,7 +181,6 @@ import { Icon } from '@/components/Icon';
 import { useMessage } from '@/hooks/web/useMessage';
 import {
   captureDeviceSnapshot,
-  updateDeviceCoverImage,
   getDeviceRegions,
   createDeviceRegion,
   updateDeviceRegion,
@@ -1095,20 +1094,10 @@ const handleCapture = async () => {
       loadImage(result.data.image_url);
       createMessage.success('抓拍成功');
       emit('image-captured', result.data.image_id, result.data.image_url);
-      
-      // 抓拍成功后，自动更新设备封面图
-      try {
-        const coverResponse = await updateDeviceCoverImage(props.deviceId);
-        const coverResult = (coverResponse as any).data || coverResponse;
-        if (coverResult.code === 0 && coverResult.data) {
-          emit('cover-updated', coverResult.data.image_url);
-        } else {
-          console.warn('自动更新封面图失败:', coverResult.msg);
-        }
-      } catch (coverError) {
-        console.error('自动更新封面图失败', coverError);
-        // 不显示错误提示，因为抓拍已经成功了
-      }
+
+      // 抓拍接口已用本次截图同步更新了设备封面，直接用返回的 image_url 同步前端即可；
+      // 无需再调 cover-image 接口（对国标设备会重复点播抓帧，易触发 10s 超时）
+      emit('cover-updated', result.data.image_url);
     } else {
       createMessage.error(result.msg || '抓拍失败');
     }
