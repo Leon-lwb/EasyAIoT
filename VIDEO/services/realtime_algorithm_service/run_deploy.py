@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime, timezone
 import pytz
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 import zlib
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -705,7 +705,7 @@ def _run_yolo_on_frame(
                 iou=0.45,
                 imgsz=imgsz,
                 infer_device=infer_device,
-                should_keep=_should_keep_detection,
+                should_keep=_make_detection_filter(yolo_model),
             )
             all_detections.extend(model_dets)
         except Exception as e:
@@ -828,20 +828,78 @@ def _is_plate_class(class_name: str) -> bool:
     return any(keyword in normalized for keyword in PLATE_CLASS_KEYWORDS)
 
 
-def _should_keep_detection(class_name: str) -> bool:
+def _model_class_name_list(model) -> List[str]:
+    """提取模型声明的全部类别名（兼容 ONNXInference.classes_dict 与 Ultralytics .names）。"""
+    names = getattr(model, 'classes_dict', None)
+    if not names:
+        names = getattr(model, 'names', None)
+    if isinstance(names, dict):
+        return [str(v) for v in names.values()]
+    if isinstance(names, (list, tuple)):
+        return [str(v) for v in names]
+    return []
+
+
+def _model_is_dedicated_face(model) -> bool:
+    """模型是否为“专用人脸/口罩模型”（其声明的全部类别都是人脸类）。"""
+    names = _model_class_name_list(model)
+    return bool(names) and all(_is_face_class(name) for name in names)
+
+
+def _model_is_dedicated_plate(model) -> bool:
+    """模型是否为“专用车牌模型”（其声明的全部类别都是车牌类）。"""
+    names = _model_class_name_list(model)
+    return bool(names) and all(_is_plate_class(name) for name in names)
+
+
+def _should_keep_detection(
+    class_name: str,
+    *,
+    dedicated_face: bool = False,
+    dedicated_plate: bool = False,
+) -> bool:
     """
     根据任务配置过滤检测类别：
-    - 关闭人脸检测时，过滤人脸类结果
-    - 关闭车牌检测时，过滤车牌类结果
+    - 关闭人脸检测时，过滤通用模型“附带”输出的人脸类结果
+    - 关闭车牌检测时，过滤通用模型“附带”输出的车牌类结果
+
+    例外：当检测来自“专用人脸/口罩模型”或“专用车牌模型”（模型声明的全部
+    类别都是人脸/车牌类）时，说明用户是显式选了这个模型，应保留其结果，
+    不受 face_detection_enabled / plate_detection_enabled 开关影响。否则口罩
+    模型（类名 face/face_mask）等会因开关关闭而被整条过滤 → 永远 0 目标、
+    永不告警。
     """
     if not task_config:
         return True
 
-    if _is_face_class(class_name) and not bool(getattr(task_config, 'face_detection_enabled', True)):
+    if (
+        _is_face_class(class_name)
+        and not dedicated_face
+        and not bool(getattr(task_config, 'face_detection_enabled', True))
+    ):
         return False
-    if _is_plate_class(class_name) and not bool(getattr(task_config, 'plate_detection_enabled', True)):
+    if (
+        _is_plate_class(class_name)
+        and not dedicated_plate
+        and not bool(getattr(task_config, 'plate_detection_enabled', True))
+    ):
         return False
     return True
+
+
+def _make_detection_filter(model) -> Callable[[str], bool]:
+    """为单个模型构造检测过滤器，专用人脸/车牌模型的结果不受对应开关影响。"""
+    dedicated_face = _model_is_dedicated_face(model)
+    dedicated_plate = _model_is_dedicated_plate(model)
+
+    def _keep(class_name: str) -> bool:
+        return _should_keep_detection(
+            class_name,
+            dedicated_face=dedicated_face,
+            dedicated_plate=dedicated_plate,
+        )
+
+    return _keep
 
 
 def _is_valid_model_file(path: str) -> bool:
