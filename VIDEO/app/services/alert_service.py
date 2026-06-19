@@ -153,12 +153,13 @@ def _alert_to_dict(alert: Alert) -> dict:
 
 def _get_alert_filter_query(args: dict) -> Query:
     """构建报警查询过滤器"""
-    # 仅返回已写入 MinIO 地址的记录（image_url 非空，record_path 非空）
+    # 仅要求已写入快照图片（image_url 非空）即视为有效告警事件。
+    # record_path（告警录像）是可选的：实时检测告警先产出快照，录像由 DVR
+    # 流水线异步回写、可能稍后才有甚至始终没有，不应因为暂无录像而把整条告警
+    # 事件从列表/统计中隐藏（否则会出现“今日告警 N 次”但列表“暂无告警信息”）。
     query: Query = Alert.query.filter(
         Alert.image_url.isnot(None),
-        db.func.trim(Alert.image_url) != '',
-        Alert.record_path.isnot(None),
-        db.func.trim(Alert.record_path) != ''
+        db.func.trim(Alert.image_url) != ''
     )
 
     if 'object' in args and args['object']:
@@ -258,7 +259,7 @@ def _get_alert_filter_query(args: dict) -> Query:
 
 
 def get_alert_list(args: dict) -> dict:
-    """获取报警列表（仅返回 image_url、record_path 均已写入 MinIO 的记录）
+    """获取报警列表（仅返回 image_url 已写入 MinIO 的记录；record_path 录像可选）
 
     Args:
         args: 查询参数字典，支持以下参数：
@@ -326,7 +327,7 @@ def get_correlation_events(correlation_id: str) -> dict:
 
 
 def get_alert_count(args: dict) -> dict:
-    """获取报警统计（与列表一致：仅统计 image_url、record_path 均已写入 MinIO 的记录，筛选条件同 get_alert_list）"""
+    """获取报警统计（与列表一致：仅统计 image_url 已写入 MinIO 的记录，record_path 录像可选，筛选条件同 get_alert_list）"""
     query = _get_alert_filter_query(args)
 
     if 'group' in args and args['group']:
