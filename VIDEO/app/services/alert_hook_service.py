@@ -130,7 +130,6 @@ def get_kafka_producer():
             # 批量发送配置（提高性能，配合 64 分区分散写入）
             batch_size=65536,  # 64KB
             linger_ms=5,  # 等待5ms以批量发送
-            buffer_memory=67108864,  # 64MB 发送缓冲
             # 客户端ID，便于在日志中识别
             client_id='video-alert-producer',
         )
