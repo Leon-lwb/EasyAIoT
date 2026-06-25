@@ -214,6 +214,18 @@ check_command() {
     return 0
 }
 
+# 容器运行状态检查（供 wait_for_postgresql / post-install 等待逻辑使用）
+container_running() {
+    docker ps --filter "name=$1" --format "{{.Names}}" 2>/dev/null | grep -q "$1"
+}
+
+container_exists() {
+    docker ps -a --filter "name=$1" --format "{{.Names}}" 2>/dev/null | grep -q "$1"
+}
+
+container_status() {
+    docker inspect --format '{{.State.Status}}' "$1" 2>/dev/null || echo ""
+}
 
 # 检查 Git 是否已安装
 check_git() {
@@ -2679,11 +2691,27 @@ wait_for_postgresql() {
     local attempt=0
     
     print_info "等待 PostgreSQL 服务就绪..."
+
+    # 容器不存在 → 快速失败，不浪费 120s 轮询
+    if ! docker ps -a --filter "name=^postgres-server$" --format "{{.Names}}" | grep -q "^postgres-server$"; then
+        print_error "PostgreSQL 容器不存在（postgres-server），无法等待"
+        return 1
+    fi
+
     while [ $attempt -lt $max_attempts ]; do
         # 检查容器是否在运行
         if ! docker ps --filter "name=postgres-server" --format "{{.Names}}" | grep -q "postgres-server"; then
             if [ $attempt -eq 0 ]; then
                 print_warning "PostgreSQL 容器未运行，等待启动..."
+            fi
+            # 容器不存在（已退出）且重试超过 10 次 → 失败
+            if [ $attempt -gt 10 ]; then
+                local _pg_status; _pg_status=$(container_status postgres-server 2>/dev/null || echo "missing")
+                if [ "$_pg_status" = "exited" ] || [ "$_pg_status" = "dead" ]; then
+                    print_error "PostgreSQL 容器已退出/死亡（状态: ${_pg_status}），不会自动恢复"
+                    print_info "查看日志: docker logs postgres-server --tail 50"
+                    return 1
+                fi
             fi
             attempt=$((attempt + 1))
             sleep 2
@@ -2692,10 +2720,20 @@ wait_for_postgresql() {
         
         # 检查服务是否就绪
         if docker exec postgres-server pg_isready -U postgres > /dev/null 2>&1; then
-            # 额外等待一下，确保数据库完全初始化
-            sleep 2
-            print_success "PostgreSQL 服务已就绪"
-            return 0
+            # pg_isready 仅检查 TCP 层是否接受连接。
+            # PostgreSQL 崩溃后 WAL 恢复期间虽可通过 pg_isready 检测，但实际查询会返回：
+            #   "the database system is not yet accepting connections"
+            #   "DETAIL: Consistent recovery state has not been yet reached."
+            # 需执行实际查询，确认数据库已完全恢复并可接受业务 SQL。
+            if docker exec postgres-server psql -U postgres -d postgres -c "SELECT 1" > /dev/null 2>&1; then
+                print_success "PostgreSQL 服务已就绪"
+                return 0
+            else
+                print_info "PostgreSQL 正在崩溃恢复中（pg_isready 已通过但查询尚未可用），继续等待..."
+                attempt=$((attempt + 1))
+                sleep 2
+                continue
+            fi
         fi
         attempt=$((attempt + 1))
         sleep 2
@@ -3854,7 +3892,13 @@ _get_service_image_from_compose() {
     '
 }
 
+# 判断 compose up 输出是否包含 OCI /dev/null 错误（rootless runc 间歇性失败）
+_is_dev_null_oci_error() {
+    grep -q "error reopening /dev/null inside container" "$1" 2>/dev/null
+}
+
 # 启动中间件容器；可选服务镜像缺失时自动跳过，避免阻塞核心中间件
+# 遇到 rootless Docker 的 /dev/null OCI 错误时自动重试（最多 3 次，退避 3/6/12s）
 compose_up_middleware() {
     local -a skip_services=("$@")
     local -a up_services=()
@@ -3894,8 +3938,123 @@ compose_up_middleware() {
     fi
 
     print_info "启动服务 (${EASYAIOT_DEPLOY_PROFILE:-full}): ${up_services[*]}"
-    mw_compose up -d "${up_services[@]}" 2>&1 | tee -a "$LOG_FILE"
-    return "${PIPESTATUS[0]}"
+    local _up_log _up_rc _retry _delay
+    _up_log=$(mktemp)
+    mw_compose up -d "${up_services[@]}" > "$_up_log" 2>&1
+    _up_rc=$?
+    cat "$_up_log" >> "$LOG_FILE"
+
+    # rootless runc /dev/null 间歇性错误 → 退避重试（等待 Docker daemon 状态恢复）
+    for _retry in 1 2 3; do
+        [ "$_up_rc" -eq 0 ] && break
+        _is_dev_null_oci_error "$_up_log" || break
+        case $_retry in
+            1) _delay=3 ;;
+            2) _delay=6 ;;
+            3) _delay=12 ;;
+        esac
+        print_warning "检测到间歇性 OCI /dev/null 错误，${_delay}s 后重试（第 ${_retry}/3 次）..."
+        sleep "$_delay"
+        : > "$_up_log"
+        mw_compose up -d "${up_services[@]}" > "$_up_log" 2>&1
+        _up_rc=$?
+        cat "$_up_log" >> "$LOG_FILE"
+    done
+    rm -f "$_up_log"
+
+    # compose up 返回成功（exit 0）但部分容器可能处于 Created 状态（OCI 启动失败）。
+    # 这些容器存在于 Docker 但未运行，后续依赖它们的服务将无法解析 DNS 主机名。
+    # 如 Redis 处于 Created → iot-system 解析 "Redis" 失败 → UnknownHostException → unhealthy。
+    _repair_created_middleware_containers
+    local _repair_rc=$?
+
+    # 如果修复成功（没有 Created 容器或已全部修复），覆盖原始错误码
+    if [ $_repair_rc -eq 0 ] && [ "$_up_rc" -ne 0 ]; then
+        print_success "Created 容器已修复，中间件启动成功"
+        _up_rc=0
+    fi
+
+    return "$_up_rc"
+}
+
+# 检测并修复 Created 状态的中间件容器（compose up 成功但 OCI 启动失败）。
+# 关键容器（Redis/Nacos/PostgresSQL/Kafka 等）若 Created 会导致业务服务 DNS 解析失败。
+# 返回 0=无 Created 容器或已全部修复；1=仍有 Created 容器未修复。
+_repair_created_middleware_containers() {
+    local _created _n _status _svc _rc=0 _up_log _up_rc _retry _delay
+    _created=$(docker ps -a --filter "status=created" --format '{{.Names}}' 2>/dev/null || true)
+    [ -z "$_created" ] && return 0
+
+    for _n in $_created; do
+        _status=$(docker inspect --format '{{.State.Status}}' "$_n" 2>/dev/null || echo "")
+        [ "$_status" = "created" ] || continue
+        print_warning "中间件容器 $_n 处于 Created 状态（OCI 启动失败，如 /dev/null 错误），尝试修复..."
+
+        # 策略1：直接 docker start（简单重试，/dev/null 问题可能已自愈）
+        if docker start "$_n" >/dev/null 2>&1; then
+            print_success "容器 $_n 已重新启动"
+            continue
+        fi
+
+        # 策略2：docker rm + 单服务 compose up（重建 OCI 上下文）
+        # 对 compose up 也加入 OCI /dev/null 错误重试，因为重建时也可能遇到同样问题
+        print_warning "docker start $_n 失败，删除后通过 compose 重建..."
+        _svc=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}' "$_n" 2>/dev/null || echo "")
+        docker rm -f "$_n" >/dev/null 2>&1 || true
+        sleep 1
+        if [ -n "$_svc" ]; then
+            _up_log=$(mktemp)
+            mw_compose up -d "$_svc" > "$_up_log" 2>&1
+            _up_rc=$?
+            cat "$_up_log" >> "$LOG_FILE"
+
+            # 对 OCI /dev/null 错误退避重试（与 compose_up_middleware 一致）
+            for _retry in 1 2 3; do
+                [ "$_up_rc" -eq 0 ] && break
+                _is_dev_null_oci_error "$_up_log" || break
+                case $_retry in
+                    1) _delay=3 ;;
+                    2) _delay=6 ;;
+                    3) _delay=12 ;;
+                esac
+                print_warning "修复 $_n ($_svc) 时检测到 OCI /dev/null 错误，${_delay}s 后重试..."
+                sleep "$_delay"
+                : > "$_up_log"
+                mw_compose up -d "$_svc" > "$_up_log" 2>&1
+                _up_rc=$?
+                cat "$_up_log" >> "$LOG_FILE"
+            done
+            rm -f "$_up_log"
+
+            if [ $_up_rc -eq 0 ]; then
+                # 等待容器进入 running 状态（OCI 启动需要一点时间）
+                local _wait=0
+                while [ $_wait -lt 10 ]; do
+                    if docker ps --filter "name=$_n" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -q "$_n"; then
+                        print_success "容器 $_n ($_svc) 已通过 compose 重建并运行"
+                        continue 2  # 跳出内层 if 和外层 for 的本次循环
+                    fi
+                    sleep 1
+                    _wait=$((_wait + 1))
+                done
+                # 超时：容器可能又进入了 Created 状态
+                local _new_status
+                _new_status=$(docker inspect --format '{{.State.Status}}' "$_n" 2>/dev/null || echo "")
+                if [ "$_new_status" = "created" ]; then
+                    print_warning "容器 $_n ($_svc) 重建后仍处于 Created 状态，OCI 启动持续失败"
+                else
+                    print_warning "容器 $_n ($_svc) 重建后状态: $_new_status（非 running）"
+                fi
+            else
+                print_warning "mw_compose up -d $_svc 返回错误码 $_up_rc"
+                cat "$_up_log" >> "$LOG_FILE" 2>/dev/null || true
+            fi
+        fi
+
+        print_error "容器 $_n 修复失败，后续业务服务可能无法解析其主机名"
+        _rc=1
+    done
+    return $_rc
 }
 
 # 收集默认不启动 / 镜像不可用的服务列表（供 compose_up_middleware 跳过）
@@ -5079,8 +5238,12 @@ install_middleware() {
         if [ -n "$container_name" ]; then
             local container_status=$(docker ps -a --filter "name=^${container_name}$" --format "{{.Status}}" 2>/dev/null | head -1 || echo "")
             if [ -n "$container_status" ]; then
-                if echo "$container_status" | grep -qE "Exited|Dead|Restarting"; then
-                    print_warning "$service ($container_name) 容器状态异常: $container_status"
+                if echo "$container_status" | grep -qE "Exited|Dead|Restarting|Created"; then
+                    if echo "$container_status" | grep -q "Created"; then
+                        print_warning "$service ($container_name) 容器处于 Created 状态（OCI 启动失败，如 /dev/null 错误）"
+                    else
+                        print_warning "$service ($container_name) 容器状态异常: $container_status"
+                    fi
                     failed_containers+=("$service")
                 fi
             fi
@@ -5100,6 +5263,8 @@ install_middleware() {
             esac
         done
         echo ""
+        # 二次修复：status 检查后可能有容器进入 Created 状态（compose_up 之后的延迟启动）
+        _repair_created_middleware_containers || true
     fi
 
     # 等待 Milvus 就绪并输出部署日志
@@ -5115,35 +5280,56 @@ install_middleware() {
 
     print_success "中间件安装完成"
     echo ""
+
+    # 以下均为 post-install 初始配置：任意失败不中断整体流程（set -e 下 return 1 会杀死脚本）。
+    # 若此时 PostgreSQL/MinIO 仍未就绪，由外层 install_linux.sh 的 wait_for_base_services + _repair_created_containers 兜底修复后，
+    # 下次重启时会通过 restart/start 流程再次执行这些初始化。
+
+    # ★ 先等待关键基础服务就绪（PostgreSQL），再执行需要数据库连通的 post-install 步骤
+    #    避免 "容器未运行" 警告淹没真正的启动失败信号
     echo ""
-    # 不再固定 sleep 10：下方 ensure_postgresql_password 内部自带 wait_for_postgresql 精确等待
-    # 确保 PostgreSQL 密码正确（确保重启后密码正确）
+    if container_exists postgres-server; then
+        if container_running postgres-server; then
+            wait_for_postgresql || print_warning "PostgreSQL 未在预期时间内就绪，部分配置可能跳过"
+        else
+            local _pg_status; _pg_status=$(container_status postgres-server)
+            print_warning "PostgreSQL 容器存在但未运行（状态: ${_pg_status}），尝试修复..."
+            _repair_created_middleware_containers || true
+            # 修复后等待 PostgreSQL 就绪（最多 30s，给它启动时间）
+            if container_running postgres-server; then
+                wait_for_postgresql || print_warning "PostgreSQL 修复后仍未就绪"
+            else
+                print_error "PostgreSQL 容器无法启动，请检查: docker logs postgres-server --tail 50"
+                print_info "常见原因：数据目录权限、端口冲突、磁盘空间不足"
+            fi
+        fi
+    else
+        print_error "PostgreSQL 容器不存在！请检查 docker-compose.yml 及 compose up 日志"
+        print_info "手动检查: docker ps -a | grep postgres; docker compose -f ${COMPOSE_FILE} logs postgres"
+    fi
+
     echo ""
-    ensure_postgresql_password
-    
-    # 配置 PostgreSQL pg_hba.conf 允许从宿主机连接
+    ensure_postgresql_password     || print_warning "PostgreSQL 密码检查跳过（容器未就绪）"
+
     echo ""
-    configure_postgresql_pg_hba
-    
-    # 配置 PostgreSQL max_connections（最大连接数）
+    configure_postgresql_pg_hba    || print_warning "pg_hba.conf 配置跳过（容器未就绪）"
+
     echo ""
-    configure_postgresql_max_connections
-    
-    # 初始化数据库
+    configure_postgresql_max_connections || print_warning "max_connections 配置跳过（容器未就绪）"
+
     echo ""
-    init_databases
-    
+    init_databases                 || print_warning "数据库初始化跳过（容器未就绪）"
+
     # 初始化 TDengine（仅启用 TDengine 中间件时）
     echo ""
     if [ "${EASYAIOT_ENABLE_TDENGINE:-0}" = "1" ] && docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'tdengine-server'; then
-        init_tdengine
+        init_tdengine || true
     else
         print_info "TDengine 未启用，跳过 TDengine 初始化（需要时: EASYAIOT_ENABLE_TDENGINE=1）"
     fi
-    
-    # 初始化 MinIO
+
     echo ""
-    init_minio
+    init_minio || print_warning "MinIO 初始化跳过"
 
     # 初始化/扩容 IoT Kafka 主题（64 分区：告警、人脸匹配、车牌匹配）
     echo ""
@@ -5212,18 +5398,37 @@ start_middleware() {
     else
         print_info "当前部署形态 (${EASYAIOT_DEPLOY_PROFILE}) 跳过 Milvus"
     fi
+
+    # ★ 等待 PostgreSQL 就绪再执行需要数据库连通的 post-install 步骤
+    echo ""
+    if container_exists postgres-server; then
+        if container_running postgres-server; then
+            wait_for_postgresql || print_warning "PostgreSQL 未在预期时间内就绪，部分配置可能跳过"
+        else
+            local _pg_status; _pg_status=$(container_status postgres-server)
+            print_warning "PostgreSQL 容器存在但未运行（状态: ${_pg_status}），尝试修复..."
+            _repair_created_middleware_containers || true
+            if container_running postgres-server; then
+                wait_for_postgresql || print_warning "PostgreSQL 修复后仍未就绪"
+            else
+                print_error "PostgreSQL 容器无法启动，请检查: docker logs postgres-server --tail 50"
+            fi
+        fi
+    else
+        print_error "PostgreSQL 容器不存在！请检查 docker-compose.yml 及 compose up 日志"
+    fi
     
     # 确保 PostgreSQL 密码正确（确保重启后密码正确）
     echo ""
-    ensure_postgresql_password
-    
+    ensure_postgresql_password     || print_warning "PostgreSQL 密码检查跳过（容器未就绪）"
+
     # 配置 PostgreSQL pg_hba.conf 允许从宿主机连接
     echo ""
-    configure_postgresql_pg_hba
-    
+    configure_postgresql_pg_hba    || print_warning "pg_hba.conf 配置跳过（容器未就绪）"
+
     # 配置 PostgreSQL max_connections（最大连接数）
     echo ""
-    configure_postgresql_max_connections
+    configure_postgresql_max_connections || print_warning "max_connections 配置跳过（容器未就绪）"
 
 
     sleep 5
@@ -5275,20 +5480,40 @@ restart_middleware() {
     echo ""
     # 不再固定 sleep 15：下方 init_kafka_iot_topics / ensure_postgresql_password
     # 各自带就绪轮询（Kafka while 重试、PG wait_for_postgresql），按需精确等待
+
+    # ★ 等待 PostgreSQL 就绪再执行 post-restart 配置
+    echo ""
+    if container_exists postgres-server; then
+        if container_running postgres-server; then
+            wait_for_postgresql || print_warning "PostgreSQL 未在预期时间内就绪，部分配置可能跳过"
+        else
+            local _pg_status; _pg_status=$(container_status postgres-server)
+            print_warning "PostgreSQL 容器存在但未运行（状态: ${_pg_status}），尝试修复..."
+            _repair_created_middleware_containers || true
+            if container_running postgres-server; then
+                wait_for_postgresql || print_warning "PostgreSQL 修复后仍未就绪"
+            else
+                print_error "PostgreSQL 容器无法启动，请检查: docker logs postgres-server --tail 50"
+            fi
+        fi
+    else
+        print_error "PostgreSQL 容器不存在！请检查 docker-compose.yml 及 compose up 日志"
+    fi
+
     echo ""
     init_kafka_topics_if_enabled
     
     # 确保 PostgreSQL 密码正确（确保重启后密码正确）
     echo ""
-    ensure_postgresql_password
-    
+    ensure_postgresql_password     || print_warning "PostgreSQL 密码检查跳过（容器未就绪）"
+
     # 配置 PostgreSQL pg_hba.conf 允许从宿主机连接
     echo ""
-    configure_postgresql_pg_hba
-    
+    configure_postgresql_pg_hba    || print_warning "pg_hba.conf 配置跳过（容器未就绪）"
+
     # 配置 PostgreSQL max_connections（最大连接数）
     echo ""
-    configure_postgresql_max_connections
+    configure_postgresql_max_connections || print_warning "max_connections 配置跳过（容器未就绪）"
 
 
     sleep 5

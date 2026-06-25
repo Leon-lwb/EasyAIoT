@@ -115,7 +115,7 @@ services:
     profiles: ["tdengine"]
     image: tdengine/tsdb:3.3.8.4
     container_name: tdengine-server
-    privileged: true
+    # privileged: true
     restart: always
     environment:
       - TZ=Asia/Shanghai
@@ -176,7 +176,7 @@ services:
     image: redis:7.4.8
     container_name: redis-server
     restart: always
-    privileged: true
+    # privileged: true
     ports:
       - "0.0.0.0:6379:6379"
     environment:

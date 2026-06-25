@@ -854,6 +854,8 @@ wait_for_container_ready() {
     local name=$1 max_attempts=$2 interval=$3
     shift 3
     local attempt=0
+    local elapsed=0
+    local progress_interval=10  # 每 10 次检测输出一次友好提示
     print_info "等待 ${name} 服务就绪..."
     while [ $attempt -lt $max_attempts ]; do
         if "$@" > /dev/null 2>&1; then
@@ -862,8 +864,13 @@ wait_for_container_ready() {
         fi
         attempt=$((attempt + 1))
         sleep "$interval"
+        elapsed=$((elapsed + interval))
+        # 每 progress_interval 次检测输出友好提示，让用户知道没有卡死
+        if [ $((attempt % progress_interval)) -eq 0 ] && [ $attempt -lt $max_attempts ]; then
+            print_info "  ${name} 仍在启动中...（已等待 ${elapsed}s，将继续等待）"
+        fi
     done
-    print_warning "${name} 服务未在预期时间内就绪，继续执行..."
+    print_warning "${name} 服务未在预期时间内就绪（已等待 ${elapsed}s），继续执行..."
     return 1
 }
 

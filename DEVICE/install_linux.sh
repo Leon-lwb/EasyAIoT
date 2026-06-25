@@ -181,7 +181,109 @@ compose_up_detached() {
     print_info "DEVICE 启动: ${up_targets[*]}"
 
     # --remove-orphans：顺带清理「已从 compose 文件移除的服务」的残留容器
-    COMPOSE_ANSI=never device_compose up -d --no-color --remove-orphans "${up_targets[@]}"
+    local _up_log _up_rc _retry _delay
+    _up_log=$(mktemp)
+    COMPOSE_ANSI=never device_compose up -d --no-color --remove-orphans "${up_targets[@]}" > "$_up_log" 2>&1
+    _up_rc=$?
+    cat "$_up_log"
+
+    # rootless runc /dev/null 间歇性错误 → 退避重试
+    for _retry in 1 2 3; do
+        [ "$_up_rc" -eq 0 ] && break
+        grep -q "error reopening /dev/null inside container" "$_up_log" 2>/dev/null || break
+        case $_retry in
+            1) _delay=3 ;;
+            2) _delay=6 ;;
+            3) _delay=12 ;;
+        esac
+        print_warning "检测到间歇性 OCI /dev/null 错误，${_delay}s 后重试（第 ${_retry}/3 次）..."
+        sleep "$_delay"
+        : > "$_up_log"
+        COMPOSE_ANSI=never device_compose up -d --no-color --remove-orphans "${up_targets[@]}" > "$_up_log" 2>&1
+        _up_rc=$?
+        cat "$_up_log"
+    done
+    rm -f "$_up_log"
+
+    # compose up 返回成功（exit 0）但部分容器可能处于 Created 状态（OCI 启动失败），
+    # 这些容器存在于网络中但未运行，依赖它们的 depends_on(service_healthy) 将永久阻塞。
+    # 典型场景：rootless Docker 下 runc 间歇性无法创建 /dev/null → 容器 Created 而非 Running。
+    _repair_created_iot_containers
+    _up_rc=$?
+
+    return "$_up_rc"
+}
+
+# 检测并修复 Created 状态的 iot-* 容器（compose up 成功但 OCI 启动失败）。
+# 返回 0=全部正常或已修复；1=仍有 Created 容器未修复。
+_repair_created_iot_containers() {
+    local _created _n _status _rc=0 _up_log _up_rc _retry _delay
+    _created=$(docker ps -a --filter "status=created" --filter "name=iot-" --format '{{.Names}}' 2>/dev/null || true)
+    [ -z "$_created" ] && return 0
+
+    for _n in $_created; do
+        _status=$(docker inspect --format '{{.State.Status}}' "$_n" 2>/dev/null || echo "")
+        [ "$_status" = "created" ] || continue
+        print_warning "DEVICE 容器 $_n 处于 Created 状态（OCI 启动失败，如 /dev/null 错误），尝试修复..."
+
+        # 策略1：直接 docker start（简单重试，/dev/null 问题可能已自愈）
+        if docker start "$_n" >/dev/null 2>&1; then
+            print_success "容器 $_n 已重新启动"
+            continue
+        fi
+
+        # 策略2：docker rm + 单容器 compose up（重建 OCI 上下文）
+        # 对 compose up 加入 OCI /dev/null 错误重试
+        print_warning "docker start $_n 失败，删除后通过 compose 重建..."
+        local _svc_name="${_n}"  # DEVICE 中 container_name == service name
+        docker rm -f "$_n" >/dev/null 2>&1 || true
+        sleep 1
+
+        _up_log=$(mktemp)
+        COMPOSE_ANSI=never device_compose up -d --no-color "$_svc_name" > "$_up_log" 2>&1
+        _up_rc=$?
+        cat "$_up_log"
+
+        # 对 OCI /dev/null 错误退避重试
+        for _retry in 1 2 3; do
+            [ "$_up_rc" -eq 0 ] && break
+            grep -q "error reopening /dev/null inside container" "$_up_log" 2>/dev/null || break
+            case $_retry in
+                1) _delay=3 ;;
+                2) _delay=6 ;;
+                3) _delay=12 ;;
+            esac
+            print_warning "修复 $_n 时检测到 OCI /dev/null 错误，${_delay}s 后重试..."
+            sleep "$_delay"
+            : > "$_up_log"
+            COMPOSE_ANSI=never device_compose up -d --no-color "$_svc_name" > "$_up_log" 2>&1
+            _up_rc=$?
+            cat "$_up_log"
+        done
+        rm -f "$_up_log"
+
+        if [ $_up_rc -eq 0 ]; then
+            # 等待容器进入 running 状态
+            local _wait=0
+            while [ $_wait -lt 10 ]; do
+                if docker ps --filter "name=$_n" --filter "status=running" --format '{{.Names}}' 2>/dev/null | grep -q "$_n"; then
+                    print_success "容器 $_n 已通过 compose 重建并运行"
+                    continue 2  # 跳出内层 if 和外层 for 的本次循环
+                fi
+                sleep 1
+                _wait=$((_wait + 1))
+            done
+            local _new_status
+            _new_status=$(docker inspect --format '{{.State.Status}}' "$_n" 2>/dev/null || echo "")
+            print_warning "容器 $_n 重建后状态: $_new_status（非 running）"
+        else
+            print_warning "device_compose up -d $_svc_name 返回错误码 $_up_rc"
+        fi
+
+        print_error "容器 $_n 修复失败，后续 depends_on 链将阻塞"
+        _rc=1
+    done
+    return $_rc
 }
 
 # up 失败时自动展示 unhealthy 容器及其日志尾部，免去手动逐个排查
@@ -1297,6 +1399,36 @@ main() {
         install|build-and-start)
             select_deploy_profile_for_install
             refresh_device_compose_profile_args
+
+            # ★ 新增：提示是否本地构建镜像（默认 N = 不本地构建，拉取预制镜像）
+            local _do_local_build=0
+            if [ -t 0 ]; then
+                print_info "========================================"
+                print_info "  镜像构建选项"
+                print_info "========================================"
+                print_info "  1) 本地构建：编译并制作 Docker 镜像（耗时较长）"
+                print_info "  2) 拉取预制镜像：从远程仓库下载预构建的镜像（快速，默认）"
+                echo ""
+                read -r -p "是否本地构建镜像？(y/N) " _build_response
+                case "${_build_response:-}" in
+                    y|Y|yes|YES) _do_local_build=1 ;;
+                    *) _do_local_build=0 ;;
+                esac
+            else
+                print_info "非交互模式，默认拉取预制镜像"
+            fi
+
+            if [ "$_do_local_build" -eq 0 ]; then
+                print_info "正在拉取预制镜像..."
+                if bash "${EASYAIOT_ROOT}/.scripts/docker/runtime_image.sh" pull; then
+                    print_success "预制镜像拉取成功"
+                    export EASYAIOT_SKIP_BUILD=1
+                else
+                    print_warning "预制镜像拉取失败，将尝试本地构建"
+                    _do_local_build=1
+                fi
+            fi
+
             print_info "部署形态: $(_deploy_profile_desc) (EASYAIOT_DEPLOY_PROFILE=${EASYAIOT_DEPLOY_PROFILE})"
             build_and_start
             ;;

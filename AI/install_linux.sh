@@ -618,7 +618,36 @@ create_env_file() {
 # 安装服务
 install_service() {
     print_info "开始安装 AI 服务..."
-    
+
+    # ★ 新增：提示是否本地构建镜像（默认 N = 不本地构建，拉取预制镜像）
+    local _do_local_build=0
+    if [ -t 0 ]; then
+        print_info "========================================"
+        print_info "  镜像构建选项"
+        print_info "========================================"
+        print_info "  1) 本地构建：编译并制作 Docker 镜像（耗时较长）"
+        print_info "  2) 拉取预制镜像：从远程仓库下载预构建的镜像（快速，默认）"
+        echo ""
+        read -r -p "是否本地构建镜像？(y/N) " _build_response
+        case "${_build_response:-}" in
+            y|Y|yes|YES) _do_local_build=1 ;;
+            *) _do_local_build=0 ;;
+        esac
+    else
+        print_info "非交互模式，默认拉取预制镜像"
+    fi
+
+    if [ "$_do_local_build" -eq 0 ]; then
+        print_info "正在拉取预制镜像..."
+        if bash "${EASYAIOT_ROOT}/.scripts/docker/runtime_image.sh" pull; then
+            print_success "预制镜像拉取成功"
+            export EASYAIOT_SKIP_BUILD=1
+        else
+            print_warning "预制镜像拉取失败，将尝试本地构建"
+            _do_local_build=1
+        fi
+    fi
+
     check_docker
     check_docker_compose
     detect_architecture
