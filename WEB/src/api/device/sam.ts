@@ -126,8 +126,20 @@ export const getSamHealth = () =>
     )
     .then((res) => ((res as { data?: unknown })?.data ?? res));
 
-export const samPredict = (data: SamPredictParams) =>
-  commonApi('post', `${Api.Sam}/predict`, { data });
+export const samPredict = (data: SamPredictParams) => {
+  // SAM 模型推理（含模型冷加载）耗时较长，超时设为 5 分钟
+  // 不使用 commonApi 以避免 cloneDeep 可能丢失 timeout 配置
+  defHttp.setHeader({ 'X-Authorization': 'Bearer ' + localStorage.getItem('jwt_token') });
+  return defHttp.post(
+    {
+      url: `${Api.Sam}/predict`,
+      data,
+      timeout: 300000,
+      headers: { ignoreCancelToken: true },
+    },
+    { isTransformResponse: true, errorMessageMode: 'none' },
+  );
+};
 
 export const samPredictFile = (file: File, params: Omit<SamPredictParams, 'image_base64'>) => {
   defHttp.setHeader({ 'X-Authorization': 'Bearer ' + localStorage.getItem('jwt_token') });
@@ -138,8 +150,8 @@ export const samPredictFile = (file: File, params: Omit<SamPredictParams, 'image
   formData.append('return_masks', String(params.return_masks ?? true));
   if (params.conf != null) formData.append('conf', String(params.conf));
   return defHttp.post(
-    { url: `${Api.Sam}/predict`, data: formData, timeout: 120000 },
-    { isTransformResponse: true },
+    { url: `${Api.Sam}/predict`, data: formData, timeout: 300000 },
+    { isTransformResponse: true, errorMessageMode: 'none' },
   );
 };
 
