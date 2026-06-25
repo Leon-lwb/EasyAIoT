@@ -88,9 +88,17 @@ prepare_cached_resources() {
     if [ "${AUTO_CACHE_PIP:-1}" = "1" ] && [ -f "$cache_script" ]; then
         print_warning "未检测到 pip-wheels，自动执行 cache_resources_arm.sh..."
         if [ -x "$cache_script" ]; then
-            "$cache_script"
+            if "$cache_script"; then
+                print_success "预缓存完成，继续安装流程"
+            else
+                print_warning "预缓存脚本执行失败，继续按现有本地资源/网络环境执行"
+            fi
         else
-            /bin/bash "$cache_script"
+            if /bin/bash "$cache_script"; then
+                print_success "预缓存完成，继续安装流程"
+            else
+                print_warning "预缓存脚本执行失败，继续按现有本地资源/网络环境执行"
+            fi
         fi
     else
         print_info "未检测到 pip-wheels，构建时将使用 pip-cache 在线安装"

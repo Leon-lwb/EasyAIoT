@@ -446,6 +446,7 @@ create_directories() {
     mkdir -p static/models
     mkdir -p temp_uploads
     mkdir -p model
+    mkdir -p alert_images
     print_success "目录创建完成"
 }
 
