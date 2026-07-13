@@ -55,13 +55,29 @@ export const AI_STREAM_LOAD_TIMEOUT_SEC = 3;
 export const AI_STREAM_HEART_TIMEOUT_SEC = 8;
 
 const LOCAL_STREAM_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0']);
-/** SRS HTTP-FLV / ZLM ws-flv 端口：mini 形态经 nginx 同页代理，浏览器不应直连 */
-const MEDIA_PROXY_PORTS = new Set(['8080', '6080']);
+
+/**
+ * RFC1918 私网 + 169.254 链路本地地址。此类 host 通常是媒体节点自身探测到的内网 IP，
+ * 公网/跨网页面浏览器无法直连，须改写为页面 host 交由 nginx 反代。
+ */
+function isPrivateLanHost(host: string): boolean {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}$/.exec(host || '');
+  if (!m) return false;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
 
 /** 流是否在远端集群 SRS/ZLM 节点（页面 nginx 无法代理，须保留原 host） */
 function isRemoteClusterStreamHost(streamHost: string, pageHostname: string): boolean {
   if (!streamHost || !pageHostname) return false;
   if (LOCAL_STREAM_HOSTS.has(streamHost) || LOCAL_STREAM_HOSTS.has(pageHostname)) return false;
+  // 私网/链路本地 IP 不是可直连的远端集群节点，改写为页面 host 经 nginx 代理
+  if (isPrivateLanHost(streamHost)) return false;
   return streamHost !== pageHostname;
 }
 
@@ -95,25 +111,19 @@ export function rewriteStreamHostToPageHost(url: string): string {
 
   try {
     const parsed = new URL(trimmed);
-    const pageHost = window.location.host;
-    if (!pageHost) return trimmed;
-
-    const streamHost = parsed.hostname;
     const pageHostname = window.location.hostname;
-    const streamPort = parsed.port || (parsed.protocol === 'https:' ? '443' : '80');
+    if (!pageHostname) return trimmed;
 
     // 集群模式：流在远端 SRS/ZLM 节点，nginx 仅代理本机 srs-host，不应改写为页面 host
-    if (isRemoteClusterStreamHost(streamHost, pageHostname)) {
+    if (isRemoteClusterStreamHost(parsed.hostname, pageHostname)) {
       return trimmed;
     }
 
-    // mini/单机：SRS(8080)/ZLM(6080) 由页面 nginx 反代，统一改为当前页面 host:port
-    if (MEDIA_PROXY_PORTS.has(streamPort)) {
-      parsed.host = pageHost;
-      return parsed.toString();
-    }
-
-    parsed.host = pageHost;
+    // mini/单机：SRS(8080)/ZLM(6080) 等本机媒体流由页面 nginx 反代，改写为当前页面 host。
+    // 用 hostname+port 分别赋值：页面在默认端口(443/80)时 window.location.port 为空，
+    // 借此清掉流地址上的 8080/6080，避免浏览器直连（公网常关闭）的媒体端口。
+    parsed.hostname = pageHostname;
+    parsed.port = window.location.port;
     return parsed.toString();
   } catch {
     return trimmed;
@@ -135,6 +145,16 @@ export function normalizeJessibucaPlayUrl(url: string): string {
     if (/^\/(ai|live)\//i.test(parsed.pathname)) {
       if (parsed.protocol === 'ws:') parsed.protocol = 'http:';
       if (parsed.protocol === 'wss:') parsed.protocol = 'https:';
+      // https 页面直连 http-flv 会被浏览器按 mixed-content 拦截。
+      // 仅升级已改写成页面 host 的地址（单机经页面 nginx 反代，随页面出 https）；
+      // 远端集群节点 host 未改写、其 8080 未必有 TLS，不能盲目升级。
+      if (
+        window.location.protocol === 'https:' &&
+        parsed.protocol === 'http:' &&
+        parsed.host === window.location.host
+      ) {
+        parsed.protocol = 'https:';
+      }
       return parsed.toString();
     }
     return trimmed;
