@@ -7,7 +7,6 @@ FROM pytorch/manylinuxaarch64-builder:cuda12.9 AS base
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     TZ=Asia/Shanghai \
-    CUDA_VISIBLE_DEVICES=0 \
     QT_QPA_PLATFORM=xcb \
     QT_X11_NO_MITSHM=1 \
     PATH=/opt/python/cp311-cp311/bin:/opt/python/cp310-cp310/bin:$PATH
@@ -216,4 +215,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
 
 # 启动命令
 CMD ["python3", "run.py"]
-

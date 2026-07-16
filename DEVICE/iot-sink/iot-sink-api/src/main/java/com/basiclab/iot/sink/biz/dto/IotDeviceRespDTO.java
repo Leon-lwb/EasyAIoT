@@ -26,6 +26,18 @@ public class IotDeviceRespDTO {
      */
     private String deviceIdentification;
     /**
+     * 协议类型
+     */
+    private String protocolType;
+    /**
+     * 设备 IP 地址
+     */
+    private String ipAddress;
+    /**
+     * 设备扩展配置 JSON
+     */
+    private String extension;
+    /**
      * 租户编号
      */
     private Long tenantId;

@@ -58,8 +58,8 @@ export function canResumeTrainTask(record?: {
   can_resume?: boolean;
   checkpoint_dir?: string;
 }): boolean {
-  if (String(record?.status || '') !== 'stopped') return false;
-  if (record?.can_resume === true) return true;
+  if (!['stopped', 'error', 'failed'].includes(String(record?.status || ''))) return false;
+  if (record?.can_resume !== undefined) return record.can_resume === true;
   return !!(record?.checkpoint_dir || '').trim();
 }
 

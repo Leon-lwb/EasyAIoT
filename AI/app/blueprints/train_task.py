@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.services.minio_service import ModelService
 from app.utils.node_client import resolve_java_backend_url
+from app.utils.train_checkpoint import find_yolo_checkpoint, is_yolo_checkpoint_resumable
 from app.utils.train_dataset_name import (
     is_legacy_bad_dataset_name,
     resolve_dataset_display_name,
@@ -333,31 +334,16 @@ def _get_completed_epochs(hp_text: str) -> int:
 
 
 def _resolve_train_checkpoint_path(model_dir: str) -> str | None:
-    if not model_dir or not os.path.isdir(model_dir):
-        return None
-    candidates = []
-    for name in os.listdir(model_dir):
-        if not name.startswith('train_results'):
-            continue
-        path = os.path.join(model_dir, name)
-        if os.path.isdir(path):
-            candidates.append(name)
-    for name in sorted(candidates, reverse=True):
-        results_dir = os.path.join(model_dir, name)
-        last_pt = os.path.join(results_dir, 'weights', 'last.pt')
-        if os.path.isfile(last_pt):
-            return os.path.abspath(last_pt)
-    return None
+    return find_yolo_checkpoint(model_dir)
 
 
 def _task_can_resume(task: TrainTask) -> bool:
-    if task.status != 'stopped':
+    if task.status not in ('stopped', 'error', 'failed'):
         return False
     checkpoint = (task.checkpoint_dir or '').strip()
-    if checkpoint and os.path.isfile(checkpoint):
-        return True
-    model_dir = _get_train_task_dir(task.id)
-    return _resolve_train_checkpoint_path(model_dir) is not None
+    if not checkpoint or not os.path.isfile(checkpoint):
+        checkpoint = _resolve_train_checkpoint_path(_get_train_task_dir(task.id)) or ''
+    return bool(checkpoint and is_yolo_checkpoint_resumable(checkpoint))
 
 
 def _normalize_model_version(version) -> str:

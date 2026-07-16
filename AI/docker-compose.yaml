@@ -6,7 +6,7 @@ services:
     image: ai-service:latest
     container_name: ai-service
     user: root
-    # runtime: nvidia  # 由 install_linux.sh 检测到 GPU 后自动启用
+    # GPU 设备申请由 install_linux.sh 生成本机专用 override 文件，基础模板保持 CPU 可用。
 
     # 业务源码经卷挂载（见下方 volumes 的 ./:/app）后，用 sh 调用入口脚本，
     # 这样宿主机 docker-entrypoint.sh 即使没有可执行位也能正常启动。
@@ -53,7 +53,6 @@ services:
       # GPU相关配置
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
       # Python环境
       - PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
       # 源码经 ./:/app 卷挂载且容器以 root 运行，禁止写 .pyc，避免 root 属主的
@@ -107,14 +106,15 @@ services:
       # 时区配置
       - TZ=${TZ:-Asia/Shanghai}
       # Ultralytics (YOLO) 配置目录
-      - YOLO_CONFIG_DIR=${YOLO_CONFIG_DIR:-/tmp/Ultralytics}
+      - YOLO_CONFIG_DIR=${YOLO_CONFIG_DIR:-/tmp}
+      - MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/matplotlib}
       # PaddleX 临时目录（通过环境变量或使用默认的 /home/appuser/.paddlex）
       # 代理配置（可选）
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - NO_PROXY=${NO_PROXY:-localhost,127.0.0.1}
       # GPU配置
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      #- NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
 
     # 资源限制（GPU 配置，如果 NVIDIA Container Toolkit 未配置，请注释掉以下部分）
     # deploy:
@@ -156,4 +156,3 @@ services:
 # 1. 使用macvlan网络（需要root权限）
 # 2. 使用host网络 + 通过IP访问中间件容器
 # 3. 使用sidecar容器模式
-
