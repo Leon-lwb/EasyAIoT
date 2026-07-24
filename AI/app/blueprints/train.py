@@ -43,6 +43,15 @@ from app.utils.gpu_utils import (
     resolve_train_dataloader_workers,
     resolve_yolo_train_device,
 )
+from app.utils.train_runtime import (
+    GpuLeaseConflict,
+    LocalGpuLeaseRegistry,
+    calculate_snapshot_progress,
+    clear_progress_snapshot,
+    is_progress_snapshot_stalled,
+    read_progress_snapshot,
+)
+from app.utils.yolo_train_trainer import ReliableDetectionTrainer
 from db_models import db, TrainTask
 
 train_bp = Blueprint('train', __name__)
@@ -53,6 +62,7 @@ MAX_LOCAL_DATASET_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
 # 全局训练状态和进程
 train_status = {}
 train_processes = {}
+local_train_gpu_leases = LocalGpuLeaseRegistry()
 
 # 数据库中表示「进行中」的状态（容器重启后需 recover_stale_train_tasks 清理）
 ACTIVE_TRAIN_STATUSES = ('preparing', 'train', 'Train', 'running', 'stopping')
@@ -202,16 +212,39 @@ def _start_train_execution(
         train_status[task_id]['message'] = msg
         local_launch_msg = msg
 
-    train_thread = threading.Thread(
-        target=train_model,
-        args=(
-            task_id, epochs, model_arch, img_size, batch_size,
-            use_gpu, dataset_zip_path, train_task.id, request_gpu_ids, dataset_source,
-            is_resume,
-        ),
-    )
-    train_thread.daemon = True
-    train_thread.start()
+    local_gpu_ids = []
+    try:
+        local_device = resolve_yolo_train_device(bool(use_gpu), request_gpu_ids)
+        if isinstance(local_device, list):
+            local_gpu_ids = local_device
+        elif isinstance(local_device, int):
+            local_gpu_ids = [local_device]
+        local_train_gpu_leases.reserve(task_id, local_gpu_ids)
+    except (GpuLeaseConflict, ValueError) as lease_error:
+        train_status.pop(task_id, None)
+        train_task.status = 'stopped' if is_resume else 'error'
+        train_task.end_time = datetime.utcnow()
+        train_task.error_log = str(lease_error)
+        train_task.train_log = (train_task.train_log or '') + f'{lease_error}\n'
+        db.session.commit()
+        return False, str(lease_error)
+
+    train_status[task_id]['gpu_ids'] = list(local_gpu_ids)
+    try:
+        train_thread = threading.Thread(
+            target=train_model,
+            args=(
+                task_id, epochs, model_arch, img_size, batch_size,
+                use_gpu, dataset_zip_path, train_task.id,
+                local_gpu_ids or None, dataset_source, is_resume,
+            ),
+        )
+        train_thread.daemon = True
+        train_thread.start()
+    except Exception:
+        local_train_gpu_leases.release(task_id)
+        train_status.pop(task_id, None)
+        raise
     return True, local_launch_msg
 
 
@@ -1112,17 +1145,23 @@ def api_stop_train(task_id):
     update_log(f"收到停止训练请求，任务ID: {task_id}", task_id)
 
     train_task = TrainTask.query.get(task_id)
+    status_entry = train_status.get(task_id)
+    runtime_status = str((status_entry or {}).get('status') or '').lower()
 
-    if task_id in train_status:
-        train_status[task_id]['stop_requested'] = True
-        train_status[task_id]['status'] = 'stopping'
-        train_status[task_id]['message'] = '正在停止训练...'
+    if status_entry and runtime_status in ('preparing', 'train', 'running', 'stopping'):
+        status_entry['stop_requested'] = True
+        status_entry['status'] = 'stopping'
+        status_entry['message'] = '正在停止训练...'
         update_log("设置停止请求标志", task_id)
 
         if train_task and train_task.node_id:
             from app.services.train_launcher_service import stop_remote_train
             stop_remote_train(train_task)
         else:
+            if train_task:
+                train_task.status = 'stopping'
+                train_task.end_time = None
+                db.session.commit()
             try:
                 terminated_pids = terminate_task_ddp_processes(
                     get_train_task_dir(task_id),
@@ -1273,7 +1312,12 @@ def _monitor_training_progress(
         heartbeat_seconds,
         int(os.getenv('TRAIN_PROGRESS_LOG_SECONDS', '60')),
     )
+    stall_timeout_seconds = max(
+        60,
+        int(os.getenv('TRAIN_STALL_TIMEOUT_SECONDS', '1800')),
+    )
     started_at = time.monotonic()
+    started_at_wall = time.time()
     last_log_elapsed = 0
 
     while not stop_event.wait(heartbeat_seconds):
@@ -1291,20 +1335,67 @@ def _monitor_training_progress(
                 if status_entry.get('status') in ('completed', 'error', 'stopped', 'stopping'):
                     return
 
+                snapshot = read_progress_snapshot(model_dir)
+                if is_progress_snapshot_stalled(
+                    snapshot,
+                    now=time.time(),
+                    timeout_seconds=stall_timeout_seconds,
+                    started_at=started_at_wall,
+                ):
+                    stall_reason = (
+                        f'训练超过 {stall_timeout_seconds} 秒没有 batch/epoch 活动，'
+                        '已终止异常 DDP 进程并保留最近断点'
+                    )
+                    status_entry.update({
+                        'status': 'error',
+                        'message': stall_reason,
+                        'failure_reason': stall_reason,
+                    })
+                    log_message = f'[{_train_log_timestamp()}] {stall_reason}'
+                    print(log_message)
+                    status_entry['log'] = status_entry.get('log', '') + log_message + '\n'
+                    task.train_log = (task.train_log or '') + log_message + '\n'
+                    db.session.commit()
+                    try:
+                        terminate_task_ddp_processes(model_dir, timeout=2)
+                    except Exception as terminate_error:
+                        print(f'训练卡死进程终止失败: {terminate_error}')
+                    return
+
                 completed_epochs = _read_completed_result_epochs(model_dir)
-                progress = max(
-                    16,
-                    int(task.progress or 0),
-                    int(status_entry.get('progress') or 0),
-                    _progress_for_completed_epochs(completed_epochs, total_epochs),
-                )
-                if completed_epochs > 0:
+                if snapshot is not None:
+                    completed_epochs = max(completed_epochs, snapshot.completed_epochs)
+                    progress = calculate_snapshot_progress(
+                        snapshot,
+                        total_epochs=total_epochs,
+                        current_progress=max(
+                            int(task.progress or 0),
+                            int(status_entry.get('progress') or 0),
+                        ),
+                    )
+                    phase_text = '验证' if snapshot.phase == 'validation' else '训练'
+                    batch_text = (
+                        f'，batch {snapshot.batch}/{snapshot.total_batches}'
+                        if snapshot.total_batches > 0 else ''
+                    )
                     message = (
-                        f'训练运行中，已完成 epoch '
-                        f'{completed_epochs}/{max(1, int(total_epochs))}...'
+                        f'{phase_text}运行中，epoch '
+                        f'{snapshot.epoch}/{max(1, int(total_epochs))}{batch_text}...'
                     )
                 else:
-                    message = f'训练运行中，首个 epoch 计算中，已持续 {elapsed_seconds} 秒...'
+                    progress = max(
+                        16,
+                        int(task.progress or 0),
+                        int(status_entry.get('progress') or 0),
+                        _progress_for_completed_epochs(completed_epochs, total_epochs),
+                    )
+                    if completed_epochs > 0:
+                        message = (
+                            f'训练运行中，已完成 epoch '
+                            f'{completed_epochs}/{max(1, int(total_epochs))}...'
+                        )
+                    else:
+                        message = f'训练运行中，首个 epoch 计算中，已持续 {elapsed_seconds} 秒...'
 
                 status_entry.update({
                     'progress': progress,
@@ -1312,11 +1403,21 @@ def _monitor_training_progress(
                 })
                 task.progress = progress
                 saved_epochs = _get_completed_epochs(task.hyperparameters)
+                progress_fields = {'completed_epochs': max(saved_epochs, completed_epochs)}
+                if snapshot is not None:
+                    progress_fields.update({
+                        'current_epoch': snapshot.epoch,
+                        'current_batch': snapshot.batch,
+                        'total_batches': snapshot.total_batches,
+                        'progress_phase': snapshot.phase,
+                        'progress_updated_at': snapshot.updated_at,
+                        'progress_message': message,
+                    })
+                task.hyperparameters = _update_hyperparameters_field(
+                    task.hyperparameters,
+                    **progress_fields,
+                )
                 if completed_epochs > saved_epochs:
-                    task.hyperparameters = _update_hyperparameters_field(
-                        task.hyperparameters,
-                        completed_epochs=completed_epochs,
-                    )
                     checkpoint_path = _resolve_train_checkpoint_path(model_dir)
                     if checkpoint_path:
                         task.checkpoint_dir = checkpoint_path
@@ -1731,6 +1832,7 @@ def train_model(task_id, epochs=20, model_arch='yolov8n.pt',
                     f'（workers 可通过 TRAIN_DATALOADER_WORKERS 覆盖）'
                 )
                 update_log_local('已进入训练计算阶段，等待首个 batch 完成...', progress=16)
+                clear_progress_snapshot(model_dir)
                 progress_monitor_stop = threading.Event()
                 ddp_stop_watcher_thread = None
                 if isinstance(device, list):
@@ -1760,6 +1862,7 @@ def train_model(task_id, epochs=20, model_arch='yolov8n.pt',
                 progress_monitor_thread.start()
                 try:
                     yolo_model.train(
+                        trainer=ReliableDetectionTrainer,
                         data=data_yaml_path,
                         epochs=epochs,
                         imgsz=img_size,
@@ -1956,7 +2059,9 @@ def train_model(task_id, epochs=20, model_arch='yolov8n.pt',
         application = create_app()
         with application.app_context():
             task = TrainTask.query.get(record_id) if record_id else None
-            error_msg = '训练已停止' if user_stopped else f'训练出错: {str(e)}'
+            runtime_failure = train_status.get(task_id, {}).get('failure_reason')
+            error_detail = runtime_failure or str(e)
+            error_msg = '训练已停止' if user_stopped else f'训练出错: {error_detail}'
             log_msg = f'[{_train_log_timestamp()}] {error_msg}'
             terminal_progress = train_status.get(task_id, {}).get('progress', 0) or 0
 
@@ -1985,7 +2090,7 @@ def train_model(task_id, epochs=20, model_arch='yolov8n.pt',
                         lambda msg: update_log(msg, task_id, train_task=task),
                     )
                 else:
-                    task.error_log = f"{str(e)}\n{traceback.format_exc()}"
+                    task.error_log = f"{error_detail}\n{traceback.format_exc()}"
                     checkpoint_path = _resolve_train_checkpoint_path(model_dir)
                     if checkpoint_path:
                         total_epochs = _get_total_epochs_from_hp(task.hyperparameters, epochs)
@@ -2034,6 +2139,7 @@ def train_model(task_id, epochs=20, model_arch='yolov8n.pt',
                     + ('' if user_stopped else traceback.format_exc()),
                 })
     finally:
+        local_train_gpu_leases.release(task_id)
         yolo_model_ref = train_processes.pop(task_id, None)
         if yolo_model_ref is not None:
             yolo_model = yolo_model_ref
