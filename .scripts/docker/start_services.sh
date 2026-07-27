@@ -333,11 +333,29 @@ main() {
     echo ""
     print_info "访问地址："
     echo "  Nacos:     http://localhost:8848/nacos (用户名/密码: nacos/nacos)"
-    echo "  MinIO:     http://localhost:9001 (用户名/密码: minioadmin/basiclab@iot975248395)"
+    echo "  MinIO:     http://localhost:9001 (用户名: minioadmin, 密码见 .env)"
     echo "  NodeRED:   http://localhost:1880"
-    echo "  EMQX:      http://localhost:18083 (用户名/密码: admin/basiclab@iot6874125784)"
+    echo "  EMQX:      http://localhost:18083 (用户名: admin, 密码见 .env)"
     echo "  SRS:       http://localhost:1985/api/v1/versions"
     echo ""
+
+    # 启动告警转发服务
+    start_alert_forwarder
+}
+
+# 启动告警转发服务
+start_alert_forwarder() {
+    local AF_DIR="/root/easyaiot/alert-forwarder"
+    if [ -f "$AF_DIR/start.sh" ]; then
+        print_info "启动告警转发服务..."
+        cd "$AF_DIR"
+        if bash start.sh start 2>/dev/null; then
+            print_success "告警转发服务已启动"
+        else
+            print_warning "告警转发服务启动失败（可能已在运行）"
+        fi
+        cd "$SCRIPT_DIR"
+    fi
 }
 
 # 执行主函数

@@ -1,0 +1,29 @@
+services:
+  alert-forwarder:
+    build: .
+    image: alert-forwarder:latest
+    container_name: alert-forwarder
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Shanghai
+      - KAFKA_BOOTSTRAP_SERVERS=kafka-server:9092
+      - KAFKA_TOPIC=iot-alert-notification
+      - KAFKA_GROUP_ID=alert-forwarder-group
+      - TARGET_URL=https://testcy.xqbg.net/testapi/api/TransparentKitchen/PutEventList
+      - API_ID=${ALERT_FORWARDER_API_ID:?请先设置ALERT_FORWARDER_API_ID}
+      - SECRET=${ALERT_FORWARDER_SECRET:?请先设置ALERT_FORWARDER_SECRET}
+      # MinIO公网地址（用于告警图片URL拼接）
+      - MINIO_PUBLIC_BASE=
+      - MINIO_BUCKET=alert-images
+    networks:
+      - easyaiot-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  easyaiot-network:
+    name: easyaiot-network
+    external: true

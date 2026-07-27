@@ -148,3 +148,26 @@ VIDEO/ffmpeg-master-*.tar.xz
 
 # install 脚本按架构自动生成的 Docker 构建配置（DOCKER_PLATFORM / BASE_IMAGE）
 **/.env.arch
+/.env
+/.scripts/docker/.env
+/WEB/conf/ssl/
+/backups/
+/data/
+/alert-forwarder/venv/
+/alert-forwarder/service.log
+/alert-forwarder/service.pid
+/.scripts/zlmediakit/conf/config.ini.bak*
+/.scripts/docker/docker-compose.yml.bak*
+/DEVICE/docker-compose.yml.bak*
+/VIDEO/app/utils/*.before-*
+/iot-gb28181-local.yaml.*.bak
+/.gitignore.bak.*
+**/.venv/
+*.bak.*
+**/*.bak.*
+**/venv/
+WEB/conf/ssl/*.key
+WEB/conf/ssl/*.pem
+WEB/conf/ssl/*.p12
+WEB/conf/ssl/*.pfx
+.credential-migration-backup-*/

@@ -1,7 +1,7 @@
 import logging
 import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
 
@@ -29,6 +29,36 @@ def parse_gb28181_source(source: Optional[str]) -> Optional[Tuple[str, str]]:
     if not device_id or not channel_id:
         return None
     return device_id, channel_id
+
+
+def _rewrite_gb28181_pull_url(url: Optional[str]) -> Optional[str]:
+    """将播放接口返回的公网 RTMP/RTSP 地址改写为算法节点内部地址。"""
+    if not isinstance(url, str) or not url.strip():
+        return url
+
+    internal_host = (os.getenv('GB28181_MEDIA_INTERNAL_HOST') or '').strip()
+    if not internal_host:
+        return url
+
+    parsed = urlsplit(url.strip())
+    if parsed.scheme.lower() not in ('rtmp', 'rtmps', 'rtsp', 'rtsps'):
+        return url
+
+    host = internal_host
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+
+    netloc = host
+    if parsed.port is not None:
+        netloc = f'{netloc}:{parsed.port}'
+
+    return urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        parsed.query,
+        parsed.fragment,
+    ))
 
 
 def _gb28181_http_timeout(default: int = 60) -> int:
@@ -246,6 +276,8 @@ def _extract_stream_url_and_meta(payload: dict) -> Tuple[Optional[str], Dict[str
         return None, {'wvp_error': err} if err else {}
     candidates, meta = _gb28181_play_candidates(body)
     chosen = next((url for url in candidates if isinstance(url, str) and url.strip()), None)
+    if chosen:
+        chosen = _rewrite_gb28181_pull_url(chosen)
     if err:
         meta['wvp_error'] = err
     return chosen, meta
@@ -272,6 +304,9 @@ def _all_play_urls_from_body(body: dict) -> List[str]:
         if not isinstance(val, str):
             continue
         u = val.strip()
+        if not u:
+            continue
+        u = _rewrite_gb28181_pull_url(u)
         if not u or u in seen:
             continue
         seen.add(u)

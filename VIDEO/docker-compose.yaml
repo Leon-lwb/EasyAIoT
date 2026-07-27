@@ -17,6 +17,7 @@ services:
     # 环境变量文件（用于Docker部署）
     env_file:
       - .env.docker
+      - ../.env
 
     # 网络模式：使用host模式以访问宿主机局域网（ONVIF发现需要）
     # 注意：使用host模式后，端口映射将失效，服务直接使用宿主机网络
@@ -58,27 +59,27 @@ services:
       - DEBUG=${DEBUG:-False}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-[*]}
       # 数据库配置（使用localhost，因为使用host网络模式，中间件端口已映射到宿主机）
-      - DATABASE_URL=postgresql://postgres:iot45722414822@localhost:5432/iot-video20
-      - SECRET_KEY=${SECRET_KEY:-your-secret-key-please-change-this-to-a-random-string}
+      - DATABASE_URL=${DATABASE_URL:?DATABASE_URL未定义}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY未定义}
       # 流地址 secure_link 签名密钥 STREAM_TICKET_SECRET 由挂载的 .env.docker 提供（容器内 /app/.env，
       # 经 dotenv 加载进 os.environ），无需在此重复；密钥须与 WEB/conf/nginx.conf 的 $stream_secret 一致。
       # Nacos配置（使用localhost，因为使用host网络模式）
       - NACOS_SERVER=${NACOS_SERVER:-localhost:8848}
       - NACOS_NAMESPACE=${NACOS_NAMESPACE:-}
       - NACOS_USERNAME=${NACOS_USERNAME:-nacos}
-      - NACOS_PASSWORD=${NACOS_PASSWORD:-basiclab@iot78475418754}
+      - NACOS_PASSWORD=${NACOS_PASSWORD:?NACOS_PASSWORD未定义}
       - SERVICE_NAME=${SERVICE_NAME:-video-server}
       # Pod IP配置（容器内会自动获取，也可手动指定）
       - POD_IP=${POD_IP:-}
       # MinIO对象存储配置（使用localhost，因为使用host网络模式）
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-localhost:9000}
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-basiclab@iot975248395}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:?MINIO_SECRET_KEY未定义}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       # Redis配置（使用localhost，因为使用host网络模式）
       - REDIS_HOST=${REDIS_HOST:-localhost}
       - REDIS_PORT=${REDIS_PORT:-6379}
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-basiclab@iot975248395}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD未定义}
       # Kafka配置（使用宿主机IP或localhost，因为使用host网络模式，不能使用容器名）
       # 如果Kafka运行在宿主机上，使用localhost:9092
       # 如果Kafka运行在其他机器上，使用宿主机IP，例如：192.168.1.100:9092
