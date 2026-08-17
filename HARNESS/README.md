@@ -95,7 +95,7 @@ HARNESS/
 | `HARNESS_ENABLE_SIDEBAR` | `1` 启用文件树侧边栏（默认），`0` 关闭 |
 | `HARNESS_SIDEBAR_PACKAGE` | 侧边栏 npm 规格，默认 `dsh-better-sidebar@0.12.1` |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key |
-| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容端点（如 DashScope） |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | OpenAI 兼容端点（如 DashScope；也可用 [OrcaRouter](https://www.orcarouter.ai)，`OPENAI_BASE_URL=https://api.orcarouter.ai/v1`） |
 | `EASYAIOT_GATEWAY_URL` | 平台 Tool 调用的 Gateway 基址 |
 | `EASYAIOT_IDEA_URL` | `easyaiot_open_in_idea` 生成的 IDEA 门户基址 |
 | `HARNESS_TRUSTED_HOSTS` | iframe 嵌入时追加 trusted-host（含 `:9300` 门户） |
