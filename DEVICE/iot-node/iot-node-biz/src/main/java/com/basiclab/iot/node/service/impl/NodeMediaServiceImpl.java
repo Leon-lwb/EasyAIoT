@@ -41,6 +41,7 @@ import javax.annotation.Resource;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Arrays;
@@ -346,7 +347,22 @@ public class NodeMediaServiceImpl implements NodeMediaService {
             resp.setSuccess(false);
             resp.setMessage(fail.getOutput());
             return resp;
+        } finally {
+            updateRecordingStorageApplyStatus(node, resp);
         }
+    }
+
+    private void updateRecordingStorageApplyStatus(ComputeNodeDO node, NodeMediaRemoteDeployRespVO resp) {
+        if (!"applying".equals(node.getRecordingStorageState())) {
+            return;
+        }
+        ComputeNodeDO update = new ComputeNodeDO();
+        update.setId(node.getId());
+        update.setRecordingStorageState(Boolean.TRUE.equals(resp.getSuccess()) ? "active" : "failed");
+        update.setRecordingStorageError(Boolean.TRUE.equals(resp.getSuccess()) ? null
+                : trimOutput(resp.getMessage(), 500));
+        update.setRecordingStorageUpdatedAt(LocalDateTime.now());
+        computeNodeMapper.updateById(update);
     }
 
     @Override

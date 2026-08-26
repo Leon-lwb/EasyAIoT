@@ -11,12 +11,24 @@
 set -euo pipefail
 
 MEDIA_CLUSTER_ROOT="${MEDIA_CLUSTER_ROOT:-/opt/easyaiot/media-cluster}"
+VIDEO_RUNTIME_ROOT="${VIDEO_RUNTIME_ROOT:-/opt/easyaiot/VIDEO}"
 MEDIA_NODE_NAME="${MEDIA_NODE_NAME:-media-node}"
 MEDIA_NODE_HOST="${MEDIA_NODE_HOST:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 MEDIA_HOOK_HOST="${MEDIA_HOOK_HOST:-127.0.0.1}"
 MEDIA_HOOK_PORT="${MEDIA_HOOK_PORT:-48080}"
 # 经 Gateway(48080) 回调需 /admin-api 前缀；直连 VIDEO(6000) 时设为空
 MEDIA_HOOK_PATH_PREFIX="${MEDIA_HOOK_PATH_PREFIX:-/admin-api}"
+MEDIA_CONTROL_HOOK_HOST="${MEDIA_CONTROL_HOOK_HOST:-${MEDIA_HOOK_HOST}}"
+MEDIA_CONTROL_HOOK_PORT="${MEDIA_CONTROL_HOOK_PORT:-${MEDIA_HOOK_PORT}}"
+MEDIA_CONTROL_HOOK_PATH_PREFIX="${MEDIA_CONTROL_HOOK_PATH_PREFIX:-${MEDIA_HOOK_PATH_PREFIX}}"
+MEDIA_DVR_HOOK_HOST="${MEDIA_DVR_HOOK_HOST:-${MEDIA_HOOK_HOST}}"
+MEDIA_DVR_HOOK_PORT="${MEDIA_DVR_HOOK_PORT:-${MEDIA_HOOK_PORT}}"
+MEDIA_DVR_HOOK_PATH_PREFIX="${MEDIA_DVR_HOOK_PATH_PREFIX:-${MEDIA_HOOK_PATH_PREFIX}}"
+MEDIA_DVR_HOOK_PATH="${MEDIA_DVR_HOOK_PATH:-/sink/media/hook/srs/on_dvr}"
+RECORDING_STORAGE_MODE="${RECORDING_STORAGE_MODE:-central_shared}"
+RECORDING_STORAGE_GENERATION="${RECORDING_STORAGE_GENERATION:-1}"
+MEDIA_RECORDING_ROOT="${MEDIA_RECORDING_ROOT:-/mnt/easyaiot-media}"
+export MEDIA_RECORDING_ROOT
 SRS_CANDIDATE_IP="${SRS_CANDIDATE_IP:-${MEDIA_NODE_HOST}}"
 SRS_RTMP_PORT="${SRS_RTMP_PORT:-1935}"
 SRS_HTTP_PORT="${SRS_HTTP_PORT:-8080}"
@@ -176,9 +188,32 @@ compose_up() {
 }
 
 ensure_dirs() {
-  print_step "创建媒体数据目录 /mnt/easyaiot-media"
-  sudo mkdir -p /mnt/easyaiot-media/playbacks /mnt/easyaiot-media/logs
-  sudo chmod -R 755 /mnt/easyaiot-media
+  print_step "创建媒体数据目录 ${MEDIA_RECORDING_ROOT}"
+  sudo mkdir -p "${MEDIA_RECORDING_ROOT}/playbacks" "${MEDIA_RECORDING_ROOT}/alert_images" \
+    "${MEDIA_RECORDING_ROOT}/events" "${MEDIA_RECORDING_ROOT}/logs" "${MEDIA_RECORDING_ROOT}/.state"
+  sudo chmod -R 755 "${MEDIA_RECORDING_ROOT}"
+  umask 077
+  cat > "${MEDIA_CLUSTER_ROOT}/recording-storage.env" <<EOF
+RECORDING_STORAGE_MODE=${RECORDING_STORAGE_MODE}
+RECORDING_STORAGE_GENERATION=${RECORDING_STORAGE_GENERATION}
+COMPUTE_NODE_ID=${COMPUTE_NODE_ID:-}
+EDGE_RECORDING_ROOT=${MEDIA_RECORDING_ROOT}
+MEDIA_HOST_DATA_ROOT=${MEDIA_RECORDING_ROOT}
+SRS_HOST_DATA_ROOT=${MEDIA_RECORDING_ROOT}
+ALERT_IMAGES_DIR=${MEDIA_RECORDING_ROOT}/alert_images
+EOF
+  if [[ -n "${MEDIA_INTERNAL_TOKEN:-}" ]]; then
+    printf 'MEDIA_INTERNAL_TOKEN=%s\n' "${MEDIA_INTERNAL_TOKEN}" >> "${MEDIA_CLUSTER_ROOT}/recording-storage.env"
+  fi
+  if [[ -n "${MEDIA_ASSET_REPORT_URL:-}" ]]; then
+    printf 'MEDIA_ASSET_REPORT_URL=%s\n' "${MEDIA_ASSET_REPORT_URL}" >> "${MEDIA_CLUSTER_ROOT}/recording-storage.env"
+  fi
+  chmod 600 "${MEDIA_CLUSTER_ROOT}/recording-storage.env"
+  # VIDEO 通常以源码目录挂载运行；同步一份到该目录，使容器和宿主机进程使用同一代存储配置。
+  if [[ -d "${VIDEO_RUNTIME_ROOT}" ]]; then
+    cp "${MEDIA_CLUSTER_ROOT}/recording-storage.env" "${VIDEO_RUNTIME_ROOT}/.recording-storage.env"
+    chmod 600 "${VIDEO_RUNTIME_ROOT}/.recording-storage.env"
+  fi
 }
 
 ensure_media_cluster() {
@@ -214,9 +249,11 @@ zlm_healthy() {
 render_srs_config() {
   local out="${MEDIA_CLUSTER_ROOT}/srs/docker.conf"
   export MEDIA_NODE_ID="${MEDIA_NODE_NAME}-srs"
-  export MEDIA_HOOK_HOST MEDIA_HOOK_PORT MEDIA_HOOK_PATH_PREFIX SRS_CANDIDATE_IP SRS_RTC_PORT
+  export MEDIA_CONTROL_HOOK_HOST MEDIA_CONTROL_HOOK_PORT MEDIA_CONTROL_HOOK_PATH_PREFIX
+  export MEDIA_DVR_HOOK_HOST MEDIA_DVR_HOOK_PORT MEDIA_DVR_HOOK_PATH_PREFIX MEDIA_DVR_HOOK_PATH
+  export SRS_CANDIDATE_IP SRS_RTC_PORT
   print_step "渲染 SRS 配置 -> ${out}"
-  envsubst '${MEDIA_NODE_ID} ${MEDIA_HOOK_HOST} ${MEDIA_HOOK_PORT} ${MEDIA_HOOK_PATH_PREFIX} ${SRS_CANDIDATE_IP} ${SRS_RTC_PORT}' \
+  envsubst '${MEDIA_NODE_ID} ${MEDIA_CONTROL_HOOK_HOST} ${MEDIA_CONTROL_HOOK_PORT} ${MEDIA_CONTROL_HOOK_PATH_PREFIX} ${MEDIA_DVR_HOOK_HOST} ${MEDIA_DVR_HOOK_PORT} ${MEDIA_DVR_HOOK_PATH_PREFIX} ${MEDIA_DVR_HOOK_PATH} ${SRS_CANDIDATE_IP} ${SRS_RTC_PORT}' \
     < "${MEDIA_CLUSTER_ROOT}/srs/cluster.conf.template" \
     | sed -E \
       -e "s/^listen[[:space:]]+[0-9]+;/listen              ${SRS_RTMP_PORT};/" \
@@ -296,6 +333,25 @@ deploy_zlm() {
   wait_zlm_healthy
 }
 
+restart_video_runtime_if_present() {
+  if docker inspect video-service >/dev/null 2>&1; then
+    print_step "重启 VIDEO 服务以加载第 ${RECORDING_STORAGE_GENERATION} 代录像存储配置"
+    docker restart video-service >/dev/null
+    local i=0
+    while [[ $i -lt 30 ]]; do
+      if curl -sf --connect-timeout 2 --max-time 3 "http://127.0.0.1:${VIDEO_SERVICE_PORT:-6000}/actuator/health" >/dev/null 2>&1; then
+        print_ok "VIDEO 服务已加载新存储配置"
+        return 0
+      fi
+      sleep 2
+      i=$((i + 1))
+    done
+    print_err "VIDEO 服务重启后未在 60 秒内就绪，请检查 docker logs video-service"
+    return 1
+  fi
+  print_skip "未发现 video-service 容器，运行时存储配置已写入，VIDEO 部署后自动加载"
+}
+
 main() {
   echo "========================================"
   echo " EasyAIoT 媒体栈部署 — ${MEDIA_NODE_NAME} @ ${MEDIA_NODE_HOST}"
@@ -307,6 +363,9 @@ main() {
     exit 0
   fi
   require_docker
+  if [[ "${RECORDING_STORAGE_MODE}" == "edge_local" ]]; then
+    SKIP_CEPH_CHECK=1
+  fi
   ensure_ceph_mount
   resolve_compose_cmd
   print_ok "Compose 命令: ${COMPOSE_CMD}"
@@ -320,6 +379,7 @@ main() {
   fi
   deploy_srs
   deploy_zlm
+  restart_video_runtime_if_present
   echo ""
   print_ok "媒体栈部署完成。请在本平台完成 Agent 纳管后，可在节点列表「更多」中管理 SRS/ZLM。"
   echo "  SRS API:  http://${MEDIA_NODE_HOST}:${SRS_API_PORT}/api/v1/versions"

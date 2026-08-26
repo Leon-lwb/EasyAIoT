@@ -3,6 +3,7 @@ package com.basiclab.iot.node.util;
 import cn.hutool.core.util.StrUtil;
 import com.basiclab.iot.node.dal.dataobject.ComputeNodeDO;
 
+import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -86,6 +87,36 @@ public final class MediaStackDeployUtil {
         env.put("MEDIA_HOOK_HOST", hookHost);
         env.put("MEDIA_HOOK_PORT", String.valueOf(hookPort));
         env.put("MEDIA_HOOK_PATH_PREFIX", pathPrefix);
+        env.put("MEDIA_CONTROL_HOOK_HOST", hookHost);
+        env.put("MEDIA_CONTROL_HOOK_PORT", String.valueOf(hookPort));
+        env.put("MEDIA_CONTROL_HOOK_PATH_PREFIX", pathPrefix);
+        env.put("MEDIA_ASSET_REPORT_URL", "http://" + hookHost + ":" + hookPort
+                + pathPrefix + "/video/internal/media/assets/report-batch");
+        String recordingMode = StrUtil.blankToDefault(node.getRecordingStorageMode(), "central_shared");
+        env.put("RECORDING_STORAGE_MODE", recordingMode);
+        env.put("RECORDING_STORAGE_GENERATION", String.valueOf(
+                node.getRecordingStorageGeneration() != null ? node.getRecordingStorageGeneration() : 1L));
+        env.put("COMPUTE_NODE_ID", String.valueOf(node.getId()));
+        env.put("MEDIA_DVR_HOOK_HOST", hookHost);
+        env.put("MEDIA_DVR_HOOK_PORT", String.valueOf(hookPort));
+        env.put("MEDIA_DVR_HOOK_PATH_PREFIX", pathPrefix);
+        env.put("MEDIA_DVR_HOOK_PATH", "/sink/media/hook/srs/on_dvr");
+        env.put("MEDIA_RECORDING_ROOT", "/mnt/easyaiot-media");
+        if ("edge_local".equals(recordingMode)) {
+            env.put("MEDIA_RECORDING_ROOT", tags != null
+                    ? StrUtil.blankToDefault(tags.get("edge_recording_root"), "/data/local-storage")
+                    : "/data/local-storage");
+            env.put("SKIP_CEPH_CHECK", "1");
+            env.put("MEDIA_DVR_HOOK_PATH", "/video/media/hook/srs/on_dvr");
+            applyEdgeMediaEndpoint(env, node.getMediaPublicUrl(), host);
+        }
+        String internalToken = System.getenv("MEDIA_INTERNAL_TOKEN");
+        if ("edge_local".equals(recordingMode) && StrUtil.isBlank(internalToken)) {
+            throw new IllegalStateException("边缘本地存储要求 iot-node 配置 MEDIA_INTERNAL_TOKEN");
+        }
+        if (StrUtil.isNotBlank(internalToken)) {
+            env.put("MEDIA_INTERNAL_TOKEN", internalToken);
+        }
         env.put("SRS_CANDIDATE_IP", host);
         env.put("SRS_RTMP_PORT", String.valueOf(srsRtmp));
         env.put("SRS_HTTP_PORT", String.valueOf(srsHttp));
@@ -100,6 +131,21 @@ public final class MediaStackDeployUtil {
         env.put("ZLM_RTP_PORT_MAX", String.valueOf(zlmRtpMax));
         env.put("ZLM_SECRET", "EasyAIoT_Media_Secret");
         return env;
+    }
+
+    private static void applyEdgeMediaEndpoint(Map<String, String> env, String publicUrl, String fallbackHost) {
+        try {
+            URI uri = URI.create(StrUtil.blankToDefault(publicUrl, "http://" + fallbackHost + ":6000"));
+            env.put("MEDIA_DVR_HOOK_HOST", StrUtil.blankToDefault(uri.getHost(), fallbackHost));
+            int port = uri.getPort() > 0 ? uri.getPort() : ("https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80);
+            env.put("MEDIA_DVR_HOOK_PORT", String.valueOf(port));
+            String prefix = StrUtil.blankToDefault(uri.getPath(), "").replaceAll("/+$", "");
+            env.put("MEDIA_DVR_HOOK_PATH_PREFIX", prefix);
+        } catch (Exception ignored) {
+            env.put("MEDIA_DVR_HOOK_HOST", fallbackHost);
+            env.put("MEDIA_DVR_HOOK_PORT", "6000");
+            env.put("MEDIA_DVR_HOOK_PATH_PREFIX", "");
+        }
     }
 
     private static String buildDeployEnvScript(

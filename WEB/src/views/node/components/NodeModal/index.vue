@@ -6,7 +6,7 @@ import { useMessage } from '@/hooks/web/useMessage';
 import { BasicDrawer, useDrawerInner } from '@/components/Drawer';
 import { BasicForm, useForm } from '@/components/Form';
 import { Button } from '@/components/Button';
-import { createNode, updateNode, type ComputeNodeVO } from '@/api/device/node';
+import { createNode, preflightRecordingStorage, updateNode, type ComputeNodeVO } from '@/api/device/node';
 import { generateDefaultAgentPort, generateRandomDeployPorts, SETUP_COPY, readMediaPortsFromTags, buildMediaPortTags, readStorageTagsFromTags, buildStorageTags, readMqttPortsFromTags, buildMqttPortTags, nodeHasAnyFunction } from '../../utils/constants';
 import {
   nodeFormHistoryToFields,
@@ -46,6 +46,7 @@ function handleGenerateRandomPorts(model: Record<string, unknown>) {
 function flattenNodeTags(record: ComputeNodeVO) {
   return {
     ...record,
+    recordingStorageMode: record.recordingStorageMode || 'central_shared',
     functions: record.functions?.length ? record.functions : undefined,
     ...readMediaPortsFromTags(record.tags),
     ...readStorageTagsFromTags(record.tags),
@@ -78,6 +79,7 @@ const [registerDrawer, { closeDrawer }] = useDrawerInner(async (data) => {
     setFieldsValue({
       sshUsername: 'root',
       agentPort: generateDefaultAgentPort(),
+      recordingStorageMode: 'central_shared',
     });
   }
 });
@@ -115,6 +117,23 @@ async function handleSubmit() {
   submitting.value = true;
   try {
     if (unref(isUpdate)) {
+      const storageModeChanged = editRecord.value?.recordingStorageMode !== values.recordingStorageMode
+        || (editRecord.value?.mediaPublicUrl || '') !== (values.mediaPublicUrl || '');
+      if (storageModeChanged && values.id && values.recordingStorageMode) {
+        const preflight = await preflightRecordingStorage(
+          Number(values.id),
+          values.recordingStorageMode as 'central_shared' | 'edge_local',
+          String(values.mediaPublicUrl || ''),
+        );
+        const blockers = preflight.checks.filter((item) => item.required && !item.ok);
+        if (!preflight.ok || blockers.length) {
+          throw new Error(blockers.map((item) => `${item.name}：${item.detail}`).join('；') || preflight.message || '录像存储模式预检未通过');
+        }
+        const warnings = preflight.checks.filter((item) => !item.required && !item.ok);
+        if (warnings.length) {
+          createMessage.warning(warnings.map((item) => item.detail).join('；'));
+        }
+      }
       await updateNode(values);
       createMessage.success('更新成功');
       closeDrawer();
@@ -185,7 +204,7 @@ function handleCancel() {
                 :max="65535"
                 class="field-with-action__control"
               />
-              <Button type="default" class="field-with-action__btn" @click="handleGenerateRandomPorts(model)">
+              <Button type="default" class="field-with-action__btn" @click="() => handleGenerateRandomPorts(model)">
                 {{ SETUP_COPY.generateRandomPortsBtn }}
               </Button>
             </div>
@@ -201,7 +220,7 @@ function handleCancel() {
                 v-if="nodeHasAnyFunction({ functions: model.functions }, ['live', 'forward'])"
                 type="default"
                 class="field-with-action__btn"
-                @click="handleGenerateRandomPorts(model)"
+                @click="() => handleGenerateRandomPorts(model)"
               >
                 {{ SETUP_COPY.generateRandomPortsBtn }}
               </Button>
@@ -219,7 +238,7 @@ function handleCancel() {
                 v-if="nodeHasAnyFunction({ functions: model.functions }, ['live', 'forward'])"
                 type="default"
                 class="field-with-action__btn"
-                @click="handleGenerateRandomPorts(model)"
+                @click="() => handleGenerateRandomPorts(model)"
               >
                 {{ SETUP_COPY.generateRandomPortsBtn }}
               </Button>
