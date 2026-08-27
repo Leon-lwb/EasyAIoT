@@ -34,6 +34,7 @@ import com.basiclab.iot.node.util.CredentialEncryptUtil;
 import com.basiclab.iot.node.util.HostIpUtil;
 import com.basiclab.iot.node.util.NodeFunctions;
 import com.basiclab.iot.node.util.RemotePortCheckUtil;
+import com.basiclab.iot.node.util.RecordingStorageMountUtil;
 import com.basiclab.iot.node.util.SshClientUtil;
 import com.basiclab.iot.node.util.SshSessionHelper;
 import com.basiclab.iot.node.util.WorkloadBundleDeployUtil;
@@ -285,8 +286,15 @@ public class ComputeNodeServiceImpl implements ComputeNodeService {
                     internalTokenConfigured ? "已配置边缘资产上报与录像访问令牌"
                             : "iot-node 未配置 MEDIA_INTERNAL_TOKEN，无法安全上报或代理边缘录像", true));
         } else {
-            checks.add(recordingStorageCheck("中心共享存储", true,
-                    "录像将由中心媒体服务写入当前共享存储；请确认边缘到中心的持续上行带宽", false));
+            if (isPlatformNode(node)) {
+                checks.add(recordingStorageCheck("中心共享存储", true,
+                        "控制面节点可使用中心本地存储目录", true));
+            } else if (online) {
+                checks.add(probeSharedRecordingStorage(node));
+            } else {
+                checks.add(recordingStorageCheck("中心共享存储", false,
+                        "节点离线，无法确认 /mnt/easyaiot-media 是否挂载 NFS/CephFS", true));
+            }
         }
 
         boolean ok = checks.stream().noneMatch(check -> Boolean.TRUE.equals(check.getRequired())
@@ -294,6 +302,52 @@ public class ComputeNodeServiceImpl implements ComputeNodeService {
         result.setOk(ok);
         result.setMessage(ok ? "录像存储模式预检通过" : "录像存储模式预检未通过，请处理阻断项");
         return result;
+    }
+
+    private NodeOnboardPreflightRespVO.Check probeSharedRecordingStorage(ComputeNodeDO node) {
+        NodeSshCredentialDO credential = nodeSshCredentialMapper.selectByNodeId(node.getId());
+        if (credential == null) {
+            return recordingStorageCheck("中心共享存储", false,
+                    "未保存 SSH 凭据，无法验证边缘节点共享存储挂载", true);
+        }
+        String password = null;
+        String privateKey = null;
+        if ("password".equals(credential.getAuthType())) {
+            password = CredentialEncryptUtil.decrypt(credential.getCredentialEnc());
+        } else {
+            privateKey = CredentialEncryptUtil.decrypt(credential.getCredentialEnc());
+        }
+        String command = "fs=$(findmnt -T /mnt/easyaiot-media -n -o FSTYPE 2>/dev/null | head -1); "
+                + "src=$(findmnt -T /mnt/easyaiot-media -n -o SOURCE 2>/dev/null | head -1); "
+                + "if [[ -d /mnt/easyaiot-media && -w /mnt/easyaiot-media ]]; then writable=yes; else writable=no; fi; "
+                + "printf '%s|%s|%s\\n' \"$fs\" \"$src\" \"$writable\"";
+        try (SshSessionHelper ssh = SshSessionHelper.connect(
+                node.getHost(), resolveSshPort(node), credential.getUsername(), credential.getAuthType(),
+                password, privateKey)) {
+            SshSessionHelper.SshExecResult probe = ssh.exec(command, 15000);
+            String[] values = probe.getStdout().trim().split("\\|", -1);
+            String fsType = values.length > 0 ? values[0].trim() : "";
+            String source = values.length > 1 ? values[1].trim() : "";
+            boolean writable = values.length > 2 && "yes".equals(values[2].trim());
+            boolean shared = probe.isSuccess()
+                    && RecordingStorageMountUtil.isSharedFilesystemType(fsType) && writable;
+            String detail;
+            if (shared) {
+                detail = "/mnt/easyaiot-media 已挂载共享存储（" + fsType + "，" + source + "）且可写";
+            } else if (RecordingStorageMountUtil.isSharedFilesystemType(fsType)) {
+                detail = "/mnt/easyaiot-media 已识别为 " + fsType + "，但目录不可写";
+            } else if (StrUtil.isNotBlank(fsType)) {
+                detail = "/mnt/easyaiot-media 当前是本地文件系统 " + fsType + "（" + source
+                        + "）；目录可写不代表中心共享存储，请挂载 NFS/CephFS 或选择边缘本地存储";
+            } else {
+                detail = "未检测到 /mnt/easyaiot-media 的共享挂载，请先挂载 NFS/CephFS";
+            }
+            return recordingStorageCheck("中心共享存储", shared, detail, true);
+        } catch (Exception exc) {
+            log.warn("录像共享存储预检失败 nodeId={}: {}", node.getId(), exc.getMessage());
+            return recordingStorageCheck("中心共享存储", false,
+                    "无法通过 SSH 验证共享存储挂载：" + StrUtil.blankToDefault(exc.getMessage(), "连接失败"), true);
+        }
     }
 
     @Override
