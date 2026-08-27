@@ -538,6 +538,23 @@ def get_alert_count(args: dict) -> dict:
             return {'count_list': None, 'total_count': 0}
 
 
+def _parse_alert_time(value):
+    """Accept both legacy Shanghai wall time and RUNTIME UTC ISO timestamps."""
+    if not isinstance(value, str):
+        if getattr(value, 'tzinfo', None) is None:
+            return value.replace(tzinfo=SHANGHAI_TZ)
+        return value.astimezone(SHANGHAI_TZ)
+
+    raw = value.strip()
+    try:
+        return datetime.strptime(raw, '%Y-%m-%d %H:%M:%S').replace(tzinfo=SHANGHAI_TZ)
+    except ValueError:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=SHANGHAI_TZ)
+        return parsed.astimezone(SHANGHAI_TZ)
+
+
 def create_alert(alert_data: dict) -> dict:
     """创建报警记录
     
@@ -567,12 +584,7 @@ def create_alert(alert_data: dict) -> dict:
         
         # 处理时间字段（东八区墙钟，与 patch_alerts_record / on_dvr 一致）
         if 'time' in alert_data and alert_data['time']:
-            if isinstance(alert_data['time'], str):
-                alert_time = datetime.strptime(alert_data['time'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=SHANGHAI_TZ)
-            elif getattr(alert_data['time'], 'tzinfo', None) is None:
-                alert_time = alert_data['time'].replace(tzinfo=SHANGHAI_TZ)
-            else:
-                alert_time = alert_data['time'].astimezone(SHANGHAI_TZ)
+            alert_time = _parse_alert_time(alert_data['time'])
         else:
             alert_time = datetime.now(SHANGHAI_TZ)
         
