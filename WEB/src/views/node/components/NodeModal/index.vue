@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, ref, unref } from 'vue';
-import { Input, InputNumber, Spin } from 'ant-design-vue';
+import { Alert, Input, InputNumber, Spin } from 'ant-design-vue';
 import { formSchema } from '../../Data';
 import { useMessage } from '@/hooks/web/useMessage';
 import { BasicDrawer, useDrawerInner } from '@/components/Drawer';
@@ -102,7 +102,9 @@ async function handleSubmit() {
   let raw: ComputeNodeVO & Record<string, unknown>;
   try {
     raw = (await validate()) as ComputeNodeVO & Record<string, unknown>;
-  } catch {
+  } catch (error) {
+    console.warn('[NodeModal] node form validation failed', error);
+    createMessage.warning('请检查节点表单中的必填项和字段格式');
     return;
   }
   const values = {
@@ -187,6 +189,14 @@ function handleCancel() {
     <Spin :spinning="submitting">
       <div class="node-drawer-content">
         <BasicForm @register="registerForm">
+          <template #centralStorageHint>
+            <Alert
+              type="warning"
+              show-icon
+              message="中心共享存储前置条件"
+              description="边缘节点的 /mnt/easyaiot-media 必须挂载与中心相同的 NFS/CephFS。仅创建本地目录或目录可写不会通过预检；未准备共享挂载时请选择“边缘本地存储”。"
+            />
+          </template>
           <template #name="{ model, field }">
             <NodeNameField
               v-model:value="model[field]"
