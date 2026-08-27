@@ -281,7 +281,15 @@ export const formSchema: FormSchema[] = [
         { label: '边缘本地存储（降低中心带宽）', value: 'edge_local' },
       ],
     },
-    helpMessage: '中心共享：持续录像经中心写入 NFS/MinIO，适合小集群和网络稳定场景；边缘本地：持续录像保留在本节点，只同步事件图片、事件片段和索引，主节点按需代理播放。',
+    helpMessage: '中心共享：边缘节点必须实际挂载与中心相同的 NFS/CephFS，普通本地目录即使可写也不符合要求；边缘本地：持续录像保留在本节点，只同步事件图片、事件片段和索引，主节点按需代理播放。',
+  },
+  {
+    label: '',
+    field: 'centralStorageHint',
+    component: 'Input',
+    slot: 'centralStorageHint',
+    colProps: { span: 24 },
+    ifShow: ({ values }) => formHasLive(values) && values.recordingStorageMode === 'central_shared',
   },
   {
     label: '录像访问地址',
