@@ -30,6 +30,7 @@ import com.basiclab.iot.node.util.MediaStackDeployUtil.DeployPhase;
 import com.basiclab.iot.node.util.MediaUrlBuilder;
 import com.basiclab.iot.node.util.RemotePortCheckUtil;
 import com.basiclab.iot.node.util.SshSessionHelper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -79,6 +80,7 @@ public class NodeMediaServiceImpl implements NodeMediaService {
             "install_media_stack.sh",
             "install_docker.sh",
             "docker-compose.media-node.yml",
+            "edge_media_agent.py",
             "srs/cluster.conf.template",
             "zlm/config.ini.template",
     };
@@ -242,7 +244,7 @@ public class NodeMediaServiceImpl implements NodeMediaService {
                 NodeMediaRemoteDeployRespVO.DeployStep syncStep = syncMediaClusterScripts(ssh, sourceRoot);
                 steps.add(syncStep);
                 NodeMediaRemoteDeployRespVO.DeployStep refreshStep = runRemoteDeployPhase(
-                        ssh, node, DeployPhase.DEPLOY_SERVICES, "刷新媒体 Hook 配置", 180000);
+                        ssh, sshCredential, node, DeployPhase.DEPLOY_SERVICES, "刷新媒体 Hook 配置", 180000);
                 steps.add(refreshStep);
                 NodeMediaRemoteDeployRespVO.DeployStep verifyStep = verifyServices(ssh, node);
                 steps.add(verifyStep);
@@ -309,7 +311,7 @@ public class NodeMediaServiceImpl implements NodeMediaService {
 
             if (needSrsTar || needZlmTar) {
                 NodeMediaRemoteDeployRespVO.DeployStep importStep = runRemoteDeployPhase(
-                        ssh, node, DeployPhase.PREPARE_IMAGES, "导入镜像", 600000);
+                        ssh, sshCredential, node, DeployPhase.PREPARE_IMAGES, "导入镜像", 600000);
                 steps.add(importStep);
                 if (!"success".equals(importStep.getStatus())) {
                     resp.setSuccess(false);
@@ -321,7 +323,7 @@ public class NodeMediaServiceImpl implements NodeMediaService {
             }
 
             NodeMediaRemoteDeployRespVO.DeployStep startStep = runRemoteDeployPhase(
-                    ssh, node, DeployPhase.DEPLOY_SERVICES, "启动服务", 300000);
+                    ssh, sshCredential, node, DeployPhase.DEPLOY_SERVICES, "启动服务", 300000);
             steps.add(startStep);
             if (!"success".equals(startStep.getStatus())) {
                 resp.setSuccess(false);
@@ -353,16 +355,30 @@ public class NodeMediaServiceImpl implements NodeMediaService {
     }
 
     private void updateRecordingStorageApplyStatus(ComputeNodeDO node, NodeMediaRemoteDeployRespVO resp) {
-        if (!"applying".equals(node.getRecordingStorageState())) {
+        boolean success = Boolean.TRUE.equals(resp.getSuccess());
+        if (!"applying".equals(node.getRecordingStorageState())
+                && !"failed".equals(node.getRecordingStorageState())) {
+            if (success && node.getRecordingStorageError() != null
+                    && !node.getRecordingStorageError().isBlank()) {
+                computeNodeMapper.update(null, new LambdaUpdateWrapper<ComputeNodeDO>()
+                        .eq(ComputeNodeDO::getId, node.getId())
+                        .set(ComputeNodeDO::getRecordingStorageError, null)
+                        .set(ComputeNodeDO::getRecordingStorageUpdatedAt, LocalDateTime.now()));
+            }
             return;
         }
         ComputeNodeDO update = new ComputeNodeDO();
         update.setId(node.getId());
-        update.setRecordingStorageState(Boolean.TRUE.equals(resp.getSuccess()) ? "active" : "failed");
-        update.setRecordingStorageError(Boolean.TRUE.equals(resp.getSuccess()) ? null
-                : trimOutput(resp.getMessage(), 500));
+        update.setRecordingStorageState(success ? "active" : "failed");
+        update.setRecordingStorageError(success ? null : trimOutput(resp.getMessage(), 500));
         update.setRecordingStorageUpdatedAt(LocalDateTime.now());
-        computeNodeMapper.updateById(update);
+        if (success) {
+            computeNodeMapper.update(update, new LambdaUpdateWrapper<ComputeNodeDO>()
+                    .eq(ComputeNodeDO::getId, node.getId())
+                    .set(ComputeNodeDO::getRecordingStorageError, null));
+        } else {
+            computeNodeMapper.updateById(update);
+        }
     }
 
     @Override
@@ -1055,7 +1071,8 @@ public class NodeMediaServiceImpl implements NodeMediaService {
     }
 
     private NodeMediaRemoteDeployRespVO.DeployStep runRemoteDeployPhase(
-            SshSessionHelper ssh, ComputeNodeDO node, DeployPhase phase, String stepName, int timeoutMs)
+            SshSessionHelper ssh, NodeSshCredential credential, ComputeNodeDO node,
+            DeployPhase phase, String stepName, int timeoutMs)
             throws Exception {
         String remoteScript = MediaStackDeployUtil.buildDeployScript(
                 node,
@@ -1063,13 +1080,19 @@ public class NodeMediaServiceImpl implements NodeMediaService {
                 controlPlaneEndpointResolver.resolveHookPort(),
                 controlPlaneEndpointResolver.resolveHookPathPrefix(),
                 phase);
+        String stdin = null;
+        if (credential.password != null && !credential.password.isBlank()) {
+            remoteScript = "export EASYAIOT_SUDO_STDIN=1\n" + remoteScript;
+            stdin = (credential.password + "\n").repeat(4);
+        }
         String encoded = Base64.getEncoder().encodeToString(remoteScript.getBytes(StandardCharsets.UTF_8));
         String tmpScript = "/tmp/easyaiot-media-" + phase.name().toLowerCase(Locale.ROOT) + ".sh";
         SshSessionHelper.SshExecResult result = ssh.exec(
                 "echo " + encoded + " | base64 -d > " + tmpScript
                         + " && chmod +x " + tmpScript
                         + " && bash " + tmpScript,
-                timeoutMs);
+                timeoutMs,
+                stdin);
         NodeMediaRemoteDeployRespVO.DeployStep step = new NodeMediaRemoteDeployRespVO.DeployStep();
         step.setName(stepName);
         step.setOutput(trimOutput(result.combinedOutput(), 8000));
