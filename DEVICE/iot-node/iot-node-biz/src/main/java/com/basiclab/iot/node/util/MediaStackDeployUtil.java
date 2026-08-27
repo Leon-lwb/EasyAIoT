@@ -102,6 +102,7 @@ public final class MediaStackDeployUtil {
         env.put("MEDIA_DVR_HOOK_PATH_PREFIX", pathPrefix);
         env.put("MEDIA_DVR_HOOK_PATH", "/sink/media/hook/srs/on_dvr");
         env.put("MEDIA_RECORDING_ROOT", "/mnt/easyaiot-media");
+        env.put("REQUIRE_SHARED_STORAGE_MOUNT", isPlatformNode(node) ? "0" : "1");
         if ("edge_local".equals(recordingMode)) {
             env.put("MEDIA_RECORDING_ROOT", tags != null
                     ? StrUtil.blankToDefault(tags.get("edge_recording_root"), "/data/local-storage")
@@ -122,6 +123,13 @@ public final class MediaStackDeployUtil {
         env.put("SRS_HTTP_PORT", String.valueOf(srsHttp));
         env.put("SRS_API_PORT", String.valueOf(srsApi));
         env.put("SRS_RTC_PORT", String.valueOf(srsRtc));
+        env.put("SRS_FORWARD_ENABLED", "off");
+        env.put("SRS_FORWARD_DESTINATION", "127.0.0.1:19350");
+        if ("edge_local".equals(recordingMode)) {
+            env.put("SRS_FORWARD_ENABLED", "on");
+            env.put("SRS_FORWARD_DESTINATION", hookHost + ":" + System.getenv().getOrDefault(
+                    "CONTROL_PLANE_SRS_RTMP_PORT", "1935"));
+        }
         env.put("ZLM_HTTP_PORT", String.valueOf(zlmHttp));
         env.put("ZLM_RTMP_PORT", String.valueOf(zlmRtmp));
         env.put("ZLM_RTSP_PORT", String.valueOf(zlmRtsp));
@@ -131,6 +139,14 @@ public final class MediaStackDeployUtil {
         env.put("ZLM_RTP_PORT_MAX", String.valueOf(zlmRtpMax));
         env.put("ZLM_SECRET", "EasyAIoT_Media_Secret");
         return env;
+    }
+
+    private static boolean isPlatformNode(ComputeNodeDO node) {
+        Map<String, Boolean> capabilities = node.getCapabilities();
+        if (capabilities == null) {
+            return false;
+        }
+        return Boolean.TRUE.equals(capabilities.get("platform"));
     }
 
     private static void applyEdgeMediaEndpoint(Map<String, String> env, String publicUrl, String fallbackHost) {
